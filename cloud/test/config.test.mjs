@@ -24,7 +24,7 @@ test("options: defaults", () => {
     tunnel: undefined,
     policy: "ask",
     waitMs: 50_000,
-    shellWaitMs: 1_800_000,
+    shellWaitMs: 1_200_000,
     legacyEncoding: undefined,
     stateDir: nodePath.join(os.homedir(), ".cursor-cloud-bridge"),
     newToken: false,

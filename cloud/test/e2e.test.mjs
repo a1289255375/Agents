@@ -2,6 +2,7 @@
 // HTTP API plays the user at the web page.
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import nodePath from "node:path";
@@ -72,6 +73,13 @@ async function until(check, message) {
   }
   throw new Error(`timed out waiting for: ${message}`);
 }
+
+// A shell poll that began after `since` is in flight. Between two polls the console still shows the
+// previous one, so the start time is what tells a new poll apart.
+const shellPoll = (state, since) => until(async () => {
+  const { waiting } = (await state()).sessions[0];
+  return waiting?.via === "shell" && waiting.since >= since;
+}, "a shell poll to start");
 
 test("the MCP endpoint requires the bearer token", async (t) => {
   const { bridge, state, agent: connectAgent } = await setup(t);
@@ -273,7 +281,7 @@ test("a wait cut off by a dropped connection or a client timeout loses and dupli
   await until(async () => (await state()).sessions[0].status === "waiting", "first wait");
   await first.client.close();
   await until(async () => (await state()).sessions[0].status !== "waiting", "the server to notice the drop");
-  assert.equal((await state()).sessions[0].hint.via, "mcp");
+  assert.equal((await state()).sessions[0].hint.holdMs, 5000);
 
   // The user sends while nobody is listening; the message waits for the agent to come back.
   await send("断线期间的指令");
@@ -417,7 +425,7 @@ test("the command policy is enforced and can be changed from the web page", asyn
   assert.match((await call("stop_command", { jobId: job.id, session })).text, /已被终止/);
 });
 
-test("shell wait: the curl long poll delivers the same events with its own narrow ticket", async (t) => {
+test("shell wait: the curl poll delivers the same events with its own narrow ticket", async (t) => {
   const { bridge, web, state, agent: connectAgent } = await setup(t);
   const { call } = await connectAgent();
   const bind = (await call("connect_session")).data;
@@ -429,8 +437,13 @@ test("shell wait: the curl long poll delivers the same events with its own narro
     return { status: response.status, type: response.headers.get("content-type"), text: await response.text() };
   };
 
-  assert.equal(bind.shellWait.blockMs, 61_500);
-  assert.equal(bind.shellWait.command, `curl -sS -N -m 31.5 -H 'Authorization: Bearer ${ticket}' '${waitUrl}' | tail -n 1`);
+  // A loop of short polls: 2 seconds in all, each request answered within the wait budget.
+  assert.equal(bind.shellWait.blockMs, 62_000);
+  assert.equal(bind.shellWait.command, `end=$(($(date +%s)+2)); n=0; while :; do `
+    + `r=$(curl -sS -m 31 -H 'Authorization: Bearer ${ticket}' "${waitUrl}?loop=$$-$end" 2>&1); `
+    + `case $r in '{"event":"idle"'*) n=0;; '{"event":"'*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
+    + `[ $(date +%s) -ge $end ] && break; done; printf '%s\\n' "$r" | tail -n 1`);
+  assert.match(bind.shellWait.instruction, /不要放进后台或 tmux.*不小于 blockMs 毫秒.*或 2 秒到时/);
 
   // The ticket opens this one session's wait and nothing else; the main token is not accepted here.
   assert.equal((await poll()).status, 401);
@@ -439,37 +452,123 @@ test("shell wait: the curl long poll delivers the same events with its own narro
   const other = await fetch(bridge.localMcpUrl, { method: "POST", headers: { Authorization: `Bearer ${ticket}` } });
   assert.equal(other.status, 401);
 
+  // The loop tells the results apart by how the body starts, so it is one compact JSON object.
+  const started = Date.now();
   const idle = await poll(ticket);
   assert.equal(idle.status, 200);
-  assert.match(idle.type, /^application\/x-ndjson/);
-  const lines = idle.text.split("\n").filter(Boolean);
-  assert.equal(lines.length, 1);
-  assert.deepEqual(JSON.parse(lines[0]).event, "idle");
-  assert.deepEqual(JSON.parse(lines[0]).nextCall, bind.nextCall);
+  assert.match(idle.type, /^application\/json/);
+  assert.match(idle.text, /^\{"event":"idle","id":"[0-9a-f]{8}",/);
+  assert.deepEqual(JSON.parse(idle.text).nextCall, bind.nextCall);
+  assert.ok(Date.now() - started >= 450 && Date.now() - started < 3000);
+  // Between two polls the session still counts as waiting.
+  assert.equal((await state()).sessions[0].status, "waiting");
 
+  const pollStarted = Date.now();
   const waiting = poll(ticket);
-  await until(async () => (await state()).sessions[0].waiting?.via === "shell", "the shell wait");
+  await shellPoll(state, pollStarted);
   await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "经由 curl 收到" } });
-  const message = JSON.parse((await waiting).text.trim());
-  assert.equal(message.event, "message");
-  assert.equal(message.message, "经由 curl 收到");
+  const delivered = (await waiting).text;
+  assert.match(delivered, /^\{"event":"message",/);
+  assert.equal(JSON.parse(delivered).message, "经由 curl 收到");
 
-  // reply_message hands out the same command again.
+  // reply_message hands out the same command again, without repeating the explanation.
   const replied = (await call("reply_message", { id, text: "好" })).data;
-  assert.equal(replied.shellWait.command, bind.shellWait.command);
+  assert.deepEqual(replied.shellWait, { command: bind.shellWait.command, blockMs: 62_000 });
 });
 
-test("shell wait: the exact command given to the agent works in a POSIX shell", { skip: windows && "cloud agents run it on Linux" }, async (t) => {
+test("shell wait: a loop the agent left behind cannot take the wait back", async (t) => {
+  const { bridge, web, state, agent: connectAgent } = await setup(t);
+  const { call } = await connectAgent();
+  const { id } = (await call("connect_session")).data;
+  const pollAs = async (loop) => {
+    const url = new URL(`/wait/${id}${loop ? `?loop=${loop}` : ""}`, bridge.localMcpUrl);
+    const response = await fetch(url, { headers: { Authorization: `Bearer ${waitTicket(token, id)}` } });
+    return (await response.json()).event;
+  };
+  // Resolves once the call is in flight; `result` is the call itself.
+  const mcpWait = async () => {
+    const result = call("wait_message", { id });
+    await until(async () => (await state()).sessions[0].waiting?.via === "mcp", "wait_message");
+    return { result };
+  };
+
+  // Between two polls a loop holds no request, so a newer wait finds nothing to supersede.
+  assert.equal(await pollAs("4242-1700000000"), "idle");
+  const live = await mcpWait();
+  // The old loop's next poll is turned away at once and leaves the newer wait alone.
+  assert.equal(await pollAs("4242-1700000000"), "superseded");
+  await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "给 wait_message 的" } });
+  assert.equal((await live.result).data.message, "给 wait_message 的");
+  await call("reply_message", { id, text: "好" });
+
+  // A run of the command started later is a new loop and waits normally.
+  assert.equal(await pollAs("4243-1700000100"), "idle");
+
+  // A poll that names no loop is a wait of its own, and the newest wait wins.
+  assert.equal(await pollAs(), "idle");
+  const older = await mcpWait();
+  const bare = pollAs();
+  assert.equal((await older.result).data.event, "superseded");
+  await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "给没有名字的轮询" } });
+  assert.equal(await bare, "message");
+});
+
+// The command exactly as the agent receives it, run by real shells against the running bridge.
+const shells = ["/bin/sh", "/bin/bash", "/bin/zsh"].filter((shell) => existsSync(shell));
+const runShell = (shell, command) => promisify(execFile)(shell, ["-c", command]);
+
+test("shell wait: the command given to the agent delivers a message", { skip: windows && "cloud agents run it on Linux" }, async (t) => {
   const { web, state, agent: connectAgent } = await setup(t, { shellWaitMs: 20_000 });
   const { call } = await connectAgent();
   const { id, shellWait } = (await call("connect_session")).data;
-  const run = promisify(execFile)("/bin/sh", ["-c", shellWait.command]);
-  await until(async () => (await state()).sessions[0].waiting?.via === "shell", "curl to connect");
-  await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "it's a \"quoted\" 指令" } });
-  const { stdout, stderr } = await run;
-  assert.equal(stderr, "");
-  assert.equal(stdout.split("\n").filter(Boolean).length, 1);
-  assert.equal(JSON.parse(stdout).message, "it's a \"quoted\" 指令");
+  for (const shell of shells) {
+    const text = `it's a "quoted" 指令 for ${shell} with $HOME, \`backticks\`, * and a\nsecond line`;
+    const started = Date.now();
+    const run = runShell(shell, shellWait.command);
+    await shellPoll(state, started);
+    // Several idle polls pass before the message arrives; the loop keeps going without any output.
+    await sleep(1200);
+    await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text } });
+    const { stdout, stderr } = await run;
+    assert.equal(stderr, "");
+    assert.equal(stdout.split("\n").filter(Boolean).length, 1, stdout);
+    assert.equal(JSON.parse(stdout).message, text);
+    await call("reply_message", { id, text: "好" });
+  }
+});
+
+test("shell wait: the command ends with idle at its deadline, on a newer wait, and after three failures", { skip: windows && "cloud agents run it on Linux" }, async (t) => {
+  const { bridge, web, state, agent: connectAgent } = await setup(t, { shellWaitMs: 2000 });
+  const { call } = await connectAgent();
+  const { id, shellWait } = (await call("connect_session")).data;
+
+  for (const shell of shells) {
+    // Nothing to deliver: polls until the 2 seconds are over, then prints the last idle result once.
+    const started = Date.now();
+    const idle = await runShell(shell, shellWait.command);
+    assert.ok(Date.now() - started >= 1000 && Date.now() - started < 8000, `${Date.now() - started} ms`);
+    assert.equal(idle.stdout.split("\n").filter(Boolean).length, 1, idle.stdout);
+    assert.equal(JSON.parse(idle.stdout).event, "idle");
+    assert.match(JSON.parse(idle.stdout).instruction, /原样重新执行同一条等待命令/);
+
+    // The agent moved on to wait_message while an old loop was still running: the loop stops.
+    const staleStarted = Date.now();
+    const stale = runShell(shell, shellWait.command.replace("+2))", "+60))"));
+    await shellPoll(state, staleStarted);
+    const viaMcp = call("wait_message", { id });
+    assert.equal(JSON.parse((await stale).stdout).event, "superseded");
+    await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: `给 wait_message 的（${shell}）` } });
+    assert.equal((await viaMcp).data.message, `给 wait_message 的（${shell}）`);
+    await call("reply_message", { id, text: "好" });
+  }
+
+  // An address that does not answer, a wrong ticket: three strikes, then the reason on the last line.
+  const quick = shellWait.command.replace("sleep 5", "sleep 0.1").replace("+2))", "+60))");
+  const refused = await runShell("/bin/sh", quick.replace(`:${new URL(bridge.localMcpUrl).port}/wait/`, ":9/wait/"));
+  assert.match(refused.stdout, /^curl: \(7\) /);
+  const denied = await runShell("/bin/sh", quick.replace(/Bearer wt_[\w-]+/, "Bearer wt_wrong"));
+  assert.match(denied.stdout, /Unauthorized/);
+  assert.ok((await state()).bridge.unauthorized >= 3);
 });
 
 test("shell wait is offered only when the public address is known and can be switched off", async (t) => {
@@ -482,7 +581,7 @@ test("shell wait is offered only when the public address is known and can be swi
 
   // A tunnel that keeps the public host name: the address is taken from the request.
   const forwarded = await viaTunnel({ "X-Forwarded-Host": "abc-def.trycloudflare.com", "X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.9" });
-  assert.match(forwarded.shellWait.command, new RegExp(`'https://abc-def\\.trycloudflare\\.com/wait/${forwarded.id}' \\| tail -n 1$`));
+  assert.ok(forwarded.shellWait.command.includes(` "https://abc-def.trycloudflare.com/wait/${forwarded.id}?loop=$$-$end" 2>&1)`));
   // A tunnel that rewrites the host to localhost: unknown address, so only wait_message is offered.
   assert.equal((await viaTunnel({ "X-Forwarded-For": "203.0.113.9" })).shellWait, undefined);
   // A host name that could break out of the shell command is never used.
@@ -518,7 +617,7 @@ test("the public address is checked against this very process", async (t) => {
   // With a known public address the shell wait uses it, whatever host the request came in on.
   const { call } = await connectAgent();
   const bind = (await call("connect_session")).data;
-  assert.ok(bind.shellWait.command.includes(`'${base}/wait/${bind.id}'`));
+  assert.ok(bind.shellWait.command.includes(`"${base}/wait/${bind.id}?loop=`));
 
   // Another bridge, a foreign server and a dead address are told apart.
   const other = await setup(t);

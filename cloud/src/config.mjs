@@ -22,8 +22,8 @@ export const usage = `用法：node cloud/src/main.mjs [项目根目录] [选项
   --public-url <地址>         隧道的公网地址，例如 https://bridge.example.com（会记住，下次不用再写）
   --tunnel cloudflared        启动时顺带运行 cloudflared 快速隧道（需要已安装 cloudflared）
   --command-policy <策略>     命令执行策略：ask 每条命令在网页上确认（默认）、allow 全部允许、deny 禁止
-  --wait-seconds <秒>         单次 MCP 工具调用最长挂起多久（默认 50）
-  --shell-wait-seconds <秒>   Shell 等待（curl 长轮询）单次最长多久，0 表示关闭（默认 1800）
+  --wait-seconds <秒>         一次等待请求最长挂起多久（默认 50；隧道或云端会更早切断时调小）
+  --shell-wait-seconds <秒>   一条 Shell 等待命令最长挂起多久，0 表示不提供 Shell 等待（默认 1200）
   --legacy-encoding <编码>    非 UTF-8 的文件和命令输出按什么编码处理（默认取系统代码页，中文 Windows 是 gbk）
   --state-dir <目录>          保存访问令牌等状态的目录（默认 ~/.cursor-cloud-bridge）
   --new-token                 重新生成访问令牌（旧令牌立即失效，云端配置要跟着改）
@@ -43,7 +43,7 @@ const optionsSchema = z.object({
   tunnel: z.enum(["cloudflared"]).optional(),
   "command-policy": z.enum(["ask", "allow", "deny"]).default("ask"),
   "wait-seconds": z.coerce.number().int().min(5).max(3600).default(50),
-  "shell-wait-seconds": z.coerce.number().int().min(0).max(86_400).default(1800),
+  "shell-wait-seconds": z.coerce.number().int().min(0).max(86_400).default(1200),
   "legacy-encoding": z.enum(legacyEncodings).optional(),
   "state-dir": z.string().min(1).optional(),
   "new-token": z.boolean().default(false),

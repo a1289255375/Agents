@@ -38,17 +38,24 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
   });
   const { files, search, commands } = project;
 
-  // The same wait as wait_message, run as a curl command in the agent's own shell tool. One shell
-  // call can block far longer than one MCP call, so an idle hour costs a few model calls, not dozens.
+  // The same wait as wait_message, run in the agent's own shell tool. One shell call can block for
+  // many minutes, so an idle hour costs a few model calls, not dozens. The command is a loop of
+  // short polls, not one long request: every poll is over before a tunnel can buffer or drop it.
+  // Three failed polls in a row end the loop, so an unreachable address sends the agent back to
+  // wait_message within seconds instead of leaving it deaf until the deadline. Each run of the
+  // command names itself (shell pid and deadline), so the hub can tell its polls from a later run's.
   function shellWait(id, explain) {
     const url = config.shellWaitMs && waitUrl(id);
     // The address comes from request headers or user input and ends up inside a shell command.
     if (!url || !/^[\w.~:/[\]%-]+$/.test(url)) return undefined;
+    const poll = `curl -sS -m ${Math.ceil(config.waitMs / 1000) + 30} -H 'Authorization: Bearer ${waitTicket(config.token, id)}' "${url}?loop=$$-$end" 2>&1`;
     return {
-      command: `curl -sS -N -m ${config.shellWaitMs / 1000 + 30} -H 'Authorization: Bearer ${waitTicket(config.token, id)}' '${url}' | tail -n 1`,
-      blockMs: config.shellWaitMs + 60_000,
+      command: `end=$(($(date +%s)+${Math.ceil(config.shellWaitMs / 1000)})); n=0; while :; do r=$(${poll}); `
+        + `case $r in '{"event":"idle"'*) n=0;; '{"event":"'*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
+        + `[ $(date +%s) -ge $end ] && break; done; printf '%s\\n' "$r" | tail -n 1`,
+      blockMs: config.shellWaitMs + config.waitMs + 60_000,
       ...(explain && {
-        instruction: `更省调用的等待方式：用你的 Shell/终端工具在前台执行 command，并把该工具的阻塞（超时）时间设为不小于 blockMs 毫秒。它会一直挂起，直到网页有新消息或 ${duration(config.shellWaitMs)}到时，然后输出一行与 wait_message 相同的 JSON；event=idle 时原样重新执行同一条命令。命令报错、被提前切断或输出不是这种 JSON 时，改为调用 nextCall（wait_message），之后也一直用 nextCall。`,
+        instruction: `更省调用的等待方式：用你的 Shell/终端工具在前台原样执行 command（不要改写，不要放进后台或 tmux），并把该工具的阻塞（超时）时间设为不小于 blockMs 毫秒。它会一直挂起，直到网页有新消息或 ${duration(config.shellWaitMs)}到时，然后输出一行与 wait_message 相同的 JSON；event=idle 时原样重新执行同一条命令。输出不是这种 JSON（命令报错、被切断或被转到后台）时，改为调用 nextCall（wait_message），之后也一直用 nextCall。`,
       }),
     };
   }

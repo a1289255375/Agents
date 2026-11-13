@@ -43,7 +43,7 @@ export function createHub({ now = Date.now } = {}) {
   function create(id, name, note) {
     const session = {
       id, name: name || `云端会话 ${++sessionCount}`, createdAt: now(), lastSeenAt: now(),
-      seq: 0, delivered: 0, acked: 0, inbox: [], timeline: [], items: 0,
+      seq: 0, delivered: 0, acked: 0, inbox: [], timeline: [], items: 0, replacedLoops: new Set(),
     };
     sessions.set(id, session);
     addToTimeline(session, "note", note);
@@ -55,8 +55,14 @@ export function createHub({ now = Date.now } = {}) {
   function forAgent(id) {
     if (closedIds.has(id)) return undefined;
     const session = sessions.get(id) ?? create(id, undefined, "服务重启后，云端 Agent 带着原会话 id 重新接入");
+    session.idling = undefined;
     touch(session);
     return session;
+  }
+
+  // What the console's advice to shorten --wait-seconds is based on.
+  function cutOff(session, waiter) {
+    session.hint = { afterMs: now() - waiter.startedAt, holdMs: waiter.holdMs, at: now() };
   }
 
   function deliver(session, message) {
@@ -65,9 +71,16 @@ export function createHub({ now = Date.now } = {}) {
     return { event: "message", seq: message.seq, message: message.text, redelivered, queued: session.inbox.length - 1 };
   }
 
+  // The wait the session is in. An idle loop is still listening in the moment between two waits,
+  // so the console does not flicker out of "waiting" every time one of them ends.
+  function waitOf(session) {
+    if (session.waiter) return session.waiter;
+    return session.idling && now() - session.lastSeenAt < graceMs ? session.idling : undefined;
+  }
+
   function statusOf(session) {
     if (session.closed) return "disconnected";
-    if (session.waiter) return "waiting";
+    if (waitOf(session)) return "waiting";
     if (session.delivered > session.acked) return "working";
     return now() - session.lastSeenAt < graceMs ? "active" : "offline";
   }
@@ -75,11 +88,12 @@ export function createHub({ now = Date.now } = {}) {
   function summaryOf(session) {
     const { id, name, createdAt, lastSeenAt, hint, closed } = session;
     const last = session.timeline.findLast((item) => item.role !== "note");
+    const wait = waitOf(session);
     return {
       id, name, createdAt, lastSeenAt, hint, closed,
       status: statusOf(session),
       queued: session.inbox.filter((message) => message.seq > session.delivered).length,
-      waiting: session.waiter && { via: session.waiter.via, since: session.waiter.startedAt, holdMs: session.waiter.holdMs },
+      waiting: wait && { via: wait.via, since: wait.startedAt, holdMs: wait.holdMs },
       preview: last?.text.slice(0, 80),
     };
   }
@@ -100,20 +114,26 @@ export function createHub({ now = Date.now } = {}) {
       }
       closedIds.delete(session.id);
       session.closed = undefined;
+      session.idling = undefined;
       touch(session);
       changed();
       return session;
     },
 
-    // Resolves with the next message, or with idle / superseded / aborted / disconnected.
-    wait(id, { signal, holdMs, via }) {
+    // Resolves with the next message, or with idle / superseded / aborted / disconnected. Only the
+    // newest wait of a session is live. `loop` names the polling loop a shell wait belongs to: its
+    // polls are one wait, so a loop the agent has moved on from cannot take the wait back.
+    wait(id, { signal, holdMs, via, loop }) {
+      if (loop && sessions.get(id)?.replacedLoops.has(loop)) return { event: "superseded" };
       const session = forAgent(id);
       if (!session) return { event: "disconnected" };
       if (signal?.aborted) return { event: "aborted" };
+      if (session.loop && session.loop !== loop) session.replacedLoops.add(session.loop);
+      session.loop = loop;
       if (session.waiter) {
-        // The client gave up on its previous call without closing it; only the newest wait is live.
-        const { startedAt, holdMs: previousHold, via: previousVia } = session.waiter;
-        session.hint = { via: previousVia, afterMs: now() - startedAt, holdMs: previousHold, at: now() };
+        // An MCP client that gave up on its call without closing it. A shell poll in this place
+        // is a loop the agent left running, which says nothing about cut-offs.
+        if (session.waiter.via === "mcp") cutOff(session, session.waiter);
         session.waiter.finish({ event: "superseded" });
       }
       if (session.inbox.length) {
@@ -124,11 +144,13 @@ export function createHub({ now = Date.now } = {}) {
         const waiter = { via, holdMs, startedAt: now() };
         const timer = setTimeout(() => {
           // A wait that ran its full length shows the earlier cut-off is no longer happening.
-          if (session.hint?.via === via) session.hint = undefined;
+          session.hint = undefined;
+          session.idling = waiter;
           waiter.finish({ event: "idle" });
         }, holdMs);
         const abort = () => {
-          session.hint = { via, afterMs: now() - waiter.startedAt, holdMs, at: now() };
+          // A shell poll also ends this way when the agent's shell tool stops the command.
+          if (via === "mcp") cutOff(session, waiter);
           waiter.finish({ event: "aborted" });
         };
         waiter.finish = (result) => {
@@ -204,7 +226,10 @@ export function createHub({ now = Date.now } = {}) {
 
     record(entry) {
       const session = sessions.get(entry.session);
-      if (session) touch(session);
+      if (session) {
+        session.idling = undefined;
+        touch(session);
+      }
       const item = { n: ++activityCount, at: now(), ...entry };
       activity.push(item);
       if (activity.length > maxActivity) activity.shift();

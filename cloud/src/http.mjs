@@ -16,7 +16,6 @@ const proxyHeaders = [
   "cf-connecting-ip", "cf-ray", "true-client-ip",
 ];
 const loopbackHost = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
-const shellKeepaliveMs = 25_000;
 const statePollMs = 25_000;
 
 function json(res, status, data, headers) {
@@ -85,24 +84,17 @@ export async function startMcpEndpoint({ bridge, hub, project, port, host }) {
     }
   }
 
-  // Long poll for agents that wait with `curl` in their shell tool, which can block far longer than
-  // one MCP tool call. Blank lines keep idle-connection timeouts of tunnels and proxies away.
-  async function handleShellWait(req, res, id) {
-    const signal = closedSignal(res);
-    res.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "Cache-Control": "no-store", "X-Accel-Buffering": "no" });
-    res.write("\n");
-    const keepalive = setInterval(() => res.write("\n"), shellKeepaliveMs);
-    try {
-      const result = await hub.wait(id, { signal, holdMs: bridge.shellWaitMs, via: "shell" });
-      res.end(`${JSON.stringify(waitResult(id, result, "shell"))}\n`);
-    } finally {
-      clearInterval(keepalive);
-    }
+  // The same wait as wait_message for agents that poll with `curl` in a loop inside their shell tool.
+  // Each request stays as short as an MCP wait: tunnels buffer a response until it is complete and
+  // lose it when it stays open for many minutes, so one long streaming response does not work.
+  async function handleShellWait(res, id, loop) {
+    const result = await hub.wait(id, { signal: closedSignal(res), holdMs: bridge.waitMs, via: "shell", loop });
+    if (!res.destroyed) json(res, 200, waitResult(id, result, "shell"));
   }
 
   const server = createServer(async (req, res) => {
     try {
-      const { pathname } = new URL(req.url, "http://bridge.invalid");
+      const { pathname, searchParams } = new URL(req.url, "http://bridge.invalid");
       if (pathname === "/" && req.method === "GET") {
         json(res, 200, { service: "cursor-cloud-bridge", instance: bridge.instance });
         return;
@@ -116,7 +108,7 @@ export async function startMcpEndpoint({ bridge, hub, project, port, host }) {
       const wait = /^\/wait\/([0-9a-f]{8})$/.exec(pathname);
       if (wait && req.method === "GET" && bridge.shellWaitMs) {
         if (!hasBearer(req, waitTicket(bridge.token, wait[1]))) unauthorized(res);
-        else await handleShellWait(req, res, wait[1]);
+        else await handleShellWait(res, wait[1], /^[\w-]{1,40}$/.exec(searchParams.get("loop") ?? "")?.[0]);
         return;
       }
       json(res, 404, { error: "not found" });

@@ -290,11 +290,10 @@ function hintText(entry) {
   }
   // Limits of clients and proxies are 30 seconds and up; anything shorter was a dropped connection.
   if (entry.hint?.afterMs >= 25_000) {
-    const { via, afterMs, holdMs } = entry.hint;
-    const [what, flag] = via === "shell" ? ["Shell 等待", "--shell-wait-seconds"] : ["wait_message", "--wait-seconds"];
+    const { afterMs, holdMs } = entry.hint;
     const after = Math.round(afterMs / 1000);
     const suggestion = Math.max(5, Math.floor((after - 5) / 5) * 5);
-    lines.push(`上一次 ${what} 在第 ${after} 秒被对端切断（设定 ${Math.round(holdMs / 1000)} 秒）。偶尔一次可以忽略；反复出现时，重启本服务并加上 ${flag} ${suggestion}。`);
+    lines.push(`上一次 wait_message 在第 ${after} 秒被对端切断（设定 ${Math.round(holdMs / 1000)} 秒）。偶尔一次可以忽略；反复出现时，重启本服务并加上 --wait-seconds ${suggestion}。`);
   }
   return lines.join("\n");
 }
