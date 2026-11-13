@@ -1,0 +1,47 @@
+name: cloud-bridge
+
+# The cloud bridge exists to work on Windows, so its tests run there on every change to it.
+on:
+  push:
+    paths:
+      - "cloud/**"
+      - "scripts/start-cloud.ps1"
+      - "start-cloud.cmd"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/cloud-bridge.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Node ${{ matrix.node }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, node: 22 }
+          - { os: windows-latest, node: 24 }
+          - { os: ubuntu-latest, node: 22 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+      # Runners have PowerShell 7 on PATH and the bridge prefers it; most Windows PCs only have 5.1.
+      - name: Test again with Windows PowerShell 5.1 only
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:PATH = ($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path (Join-Path $_ 'pwsh.exe')) }) -join ';'
+          if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { throw 'pwsh.exe is still on PATH' }
+          npm test
+          exit $LASTEXITCODE
