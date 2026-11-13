@@ -78,3 +78,7 @@ WebUI 运行时会检查 Cursor 窗口的本机 Web MCP 连接。新窗口如果
 ```powershell
 npm run smoke -- --mode chat --prompt '只回复 CURSOR_MCP_OK，不调用工具。'
 ```
+
+## 云端桥：让 Cloud Agent 操作本机项目
+
+以上都是驱动本机 Cursor Desktop 的本地方案。要让运行在 Cursor 云端的 Cloud Agent 通过 MCP 读写本机项目、执行命令，并在网页上给它下指令，用 `start-cloud.cmd`，说明见 [cloud/README.md](cloud/README.md)。两套方案互不影响，可以同时运行。
