@@ -404,7 +404,9 @@ test("the command policy is enforced and can be changed from the web page", asyn
 
   // allow: runs at once.
   await web("/api/policy", { method: "POST", body: { policy: "allow" } });
-  assert.match((await call("run_command", { command: nodeCommand("say.js three"), session })).text, /已结束，退出码 0，.*\nsaid three\n$/s);
+  let allowed = (await call("run_command", { command: nodeCommand("say.js three"), session })).text;
+  while (allowed.includes("仍在运行")) allowed = (await call("command_status", { jobId: "c2", session })).text;
+  assert.match(allowed, /已结束，退出码 0，.*\nsaid three\n$/s);
   assert.equal((await web("/api/policy", { method: "POST", body: { policy: "everything" } })).status, 400);
 
   // The user stops a running command from the web page.

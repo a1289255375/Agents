@@ -107,9 +107,12 @@ test("a slow command reports progress and can be polled from an offset", async (
 });
 
 test("a prompt without a trailing newline becomes visible", async (t) => {
-  const { runner } = await setup(t, { waitMs: 3000 });
+  const { runner } = await setup(t, { waitMs: 1000 });
   const id = await runner.request({ command: "node prompt.js" });
-  assert.match(await runner.report(id), /仍在运行.*\ncontinue\? \[y\/N\] $/s);
+  let report = await runner.report(id);
+  // A cold PowerShell start on Windows can take several seconds.
+  for (let attempt = 0; attempt < 15 && !report.includes("continue?"); attempt++) report = await runner.report(id);
+  assert.match(report, /仍在运行.*\ncontinue\? \[y\/N\] $/s);
   runner.stop(id);
   assert.match(await runner.report(id), /^\[c1\] 已被终止/);
 });
@@ -127,10 +130,12 @@ test("long output keeps its head and tail", async (t) => {
 
 test("timeout kills the whole process tree", async (t) => {
   const { root, runner } = await setup(t);
-  const id = await runner.request({ command: "node tree.js", timeoutSeconds: 3 });
+  // Long enough for a cold PowerShell start on Windows to get both processes running first.
+  const timeoutSeconds = windows ? 10 : 3;
+  const id = await runner.request({ command: "node tree.js", timeoutSeconds });
   const [parent, child] = [await pidFrom(root, "parent.pid"), await pidFrom(root, "child.pid")];
   assert.ok(alive(parent) && alive(child));
-  assert.match(await runner.report(id), /^\[c1\] 超过 3 秒仍未结束，已终止整个进程树/);
+  assert.match(await runner.report(id), new RegExp(`^\\[c1\\] 超过 ${timeoutSeconds} 秒仍未结束，已终止整个进程树`));
   assert.ok(await gone(parent), "parent process still alive");
   assert.ok(await gone(child), "grandchild process still alive");
 });
