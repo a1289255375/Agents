@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+/sessions/
+/bajiemcp_v4.0.6源码/
+/bajiemcp_v4.0.6源码.rar
+/cursor-host协议/
+/cursor-session-mcp/

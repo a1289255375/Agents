@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cursor 会话</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" type="module"></script>
+  <script src="/subagents.js" type="module"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">›_</span> Cursor 会话</div>
+    <button type="button" id="open-dispatch" class="open-dispatch">Multitask 派发子代理</button>
+    <div class="sidebar-heading">
+      <span>已接入会话 <span id="count">0</span></span>
+      <button type="button" id="toggle-batch" aria-controls="batch-actions" aria-expanded="false" hidden>批量管理</button>
+    </div>
+    <div id="batch-actions" class="batch-actions" hidden>
+      <label><input id="select-all" type="checkbox"> 全选</label>
+      <button type="button" id="open-batch-delete" disabled>删除所选</button>
+    </div>
+    <nav id="sessions" aria-label="已接入会话"></nav>
+    <div class="endpoint">MCP <code id="endpoint"></code></div>
+  </aside>
+  <main>
+    <header class="chat-header">
+      <div><h1 id="title" class="session-heading"><span class="session-name">会话</span><time class="session-created" hidden></time></h1><p id="project" hidden></p></div>
+      <div class="chat-actions">
+        <span id="status" class="status" role="status">正在连接</span>
+        <button type="button" id="open-delete" hidden>删除会话</button>
+      </div>
+    </header>
+    <p id="session-dispatch-error" class="session-dispatch-error" role="status" hidden></p>
+    <div id="session-details" class="session-details" hidden>
+      <p id="session-model"></p>
+      <div class="context-usage" title="Cursor 最近报告的上下文占用">
+        <progress id="context-progress" max="100" aria-label="上下文已用百分比" hidden></progress>
+        <span id="context-value"></span>
+      </div>
+    </div>
+    <div id="chat" class="chat" tabindex="0" aria-label="对话记录">
+      <div id="empty" class="empty">
+        <h2>从 Cursor 接入会话</h2>
+        <p>在 Cursor 打开一个会话，调用 <code>connect_session</code>。</p>
+        <p>会话出现在左侧后，可在网页发消息。</p>
+      </div>
+      <div id="messages" class="messages" hidden></div>
+    </div>
+    <div class="composer-area" id="composer-area" hidden>
+      <p id="notice" role="alert" hidden></p>
+      <form id="form" class="composer">
+        <label for="input" class="sr-only">消息</label>
+        <textarea id="input" rows="2" maxlength="100000" placeholder="发消息给 Cursor" required></textarea>
+        <div class="composer-actions">
+          <button id="send" type="submit" aria-label="发送消息" title="发送消息"><span aria-hidden="true">↑</span></button>
+        </div>
+      </form>
+    </div>
+  </main>
+  <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-summary">
+    <h2 id="delete-title">删除会话？</h2>
+    <ul id="delete-targets"></ul>
+    <p id="delete-summary">移除所选网页会话及消息，并结束网页等待。默认保留 Cursor 聊天记录。</p>
+    <form id="delete-form" method="dialog">
+      <label id="delete-cursor-option"><input id="delete-cursor" type="checkbox" aria-describedby="delete-cursor-warning"> 同时删除 Cursor 中的会话</label>
+      <p id="delete-cursor-warning" hidden>Cursor 聊天记录也会被删除，无法从网页恢复。Cursor 可能一并清理关联的工作树。</p>
+      <p id="delete-error" role="alert" hidden></p>
+      <div class="delete-actions">
+        <button type="button" id="cancel-delete" autofocus>取消</button>
+        <button type="submit" id="confirm-delete">确认删除</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="dispatch-dialog" aria-labelledby="dispatch-title">
+    <div class="dispatch-heading">
+      <h2 id="dispatch-title">Multitask 派发子代理</h2>
+      <form method="dialog"><button type="submit" aria-label="关闭">关闭</button></form>
+    </div>
+    <form id="dispatch-form">
+      <fieldset id="dispatch-settings">
+        <div class="dispatch-targets">
+          <label for="dispatch-target">Cursor 工作区</label>
+          <select id="dispatch-target" disabled></select>
+          <label for="dispatch-method">子代理创建方式</label>
+          <select id="dispatch-method">
+            <option value="mcp">父代理调用 MCP</option>
+            <option value="native">父代理用 Cursor 原生工具</option>
+          </select>
+        </div>
+        <div id="dispatch-agents"></div>
+        <div id="dispatch-result" hidden>
+          <label for="dispatch-output">派发提示词</label>
+          <textarea id="dispatch-output" rows="8" maxlength="100000"></textarea>
+          <button type="button" id="dispatch-copy">复制提示词</button>
+        </div>
+      </fieldset>
+      <p id="dispatch-notice" role="status"></p>
+      <div class="dispatch-actions">
+        <button id="dispatch-add" type="button" disabled>添加模型档位</button>
+        <span id="dispatch-total" aria-live="polite"></span>
+        <button id="dispatch-generate" type="button" disabled>查看／编辑提示词</button>
+        <button id="dispatch-send" type="submit" disabled>发送到 Cursor</button>
+      </div>
+    </form>
+  </dialog>
+</body>
+</html>
