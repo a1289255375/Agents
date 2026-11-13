@@ -72,7 +72,7 @@ export function normalizePublicUrl(input) {
   return url.origin + url.pathname.replace(/\/+$/, "").replace(/\/mcp$/, "");
 }
 
-export function parseOptions(argv) {
+export function parseOptions(argv, platform = process.platform) {
   let parsed;
   try {
     parsed = parseArgs({
@@ -93,9 +93,14 @@ export function parseOptions(argv) {
     throw new ConfigError(`选项 --${name} 的值无效：${values[name]}`);
   }
   const options = result.data;
+  const root = options.root && cleanRoot(options.root);
+  // "D:\my project\" --port 1 reaches a Windows program as one argument: D:\my project" --port 1
+  if (platform === "win32" && root?.includes('"')) {
+    throw new ConfigError(`项目根目录里混进了引号和后面的参数：${root}\n带引号的路径不要以 \\ 结尾，例如把 "D:\\my project\\" 写成 "D:\\my project"`);
+  }
   return {
     help: options.help,
-    root: options.root && cleanRoot(options.root),
+    root,
     port: options.port,
     mcpPort: options["mcp-port"],
     mcpHost: options["mcp-host"],

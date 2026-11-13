@@ -135,7 +135,14 @@ export async function startBridge({
 
     selfTest,
   };
-  const web = await startConsole({ bridge, hub, project, port, actions });
+  let web;
+  try {
+    web = await startConsole({ bridge, hub, project, port, actions });
+  } catch (error) {
+    // Otherwise the listener that did start keeps the process alive after the error is reported.
+    mcp.server.close();
+    throw error;
+  }
   if (tunnel === "cloudflared") runTunnel();
 
   return {
