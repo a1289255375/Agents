@@ -123,12 +123,25 @@ test("search does not follow links out of the project", async (t) => {
   assert.doesNotMatch((await tools.findFiles({ pattern: "*.txt", includeIgnored: true })).text, /b\.txt/);
   await assert.rejects(tools.searchText({ pattern: "secret", path: "link" }), /指向项目根目录之外/);
 
-  // git lists a link to a file like any other file; its target must still not be read.
+  // Git for Windows lists the files behind a junction as if they were in the project.
   execFileSync("git", ["init", "-q"], { cwd: nodePath.join(base, "project") });
+  const viaGit = (await tools.searchText({ pattern: "secret" })).text;
+  assert.match(viaGit, /a\.txt/);
+  assert.doesNotMatch(viaGit, /b\.txt|outside secret/);
+  assert.doesNotMatch((await tools.findFiles({ pattern: "*.txt" })).text, /b\.txt/);
+
+  // git lists a link to a file like any other file; its target must still not be read.
   if (await trySymlink(t, nodePath.join(base, "outside", "b.txt"), nodePath.join(base, "project", "leak.txt"), "file")) {
-    const viaGit = (await tools.searchText({ pattern: "secret" })).text;
-    assert.match(viaGit, /a\.txt/);
-    assert.doesNotMatch(viaGit, /outside secret/);
+    const withLink = (await tools.searchText({ pattern: "secret" })).text;
+    assert.match(withLink, /a\.txt/);
+    assert.doesNotMatch(withLink, /outside secret/);
     await assert.rejects(tools.searchText({ pattern: "secret", path: "leak.txt" }), /指向项目根目录之外/);
   }
+
+  // A junction that stays inside the project is searched like any directory.
+  await writeTree(base, { "project/real/c.txt": "nested secret\n" });
+  await fs.symlink(nodePath.join(base, "project", "real"), nodePath.join(base, "project", "alias"), windows ? "junction" : "dir");
+  const nested = (await tools.searchText({ pattern: "secret" })).text;
+  assert.match(nested, /real\/c\.txt\n {2}1:nested secret/);
+  if (windows) assert.match(nested, /alias\/c\.txt\n {2}1:nested secret/);
 });

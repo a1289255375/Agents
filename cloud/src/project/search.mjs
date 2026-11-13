@@ -80,6 +80,19 @@ export function createSearchTools({ guard, legacyEncoding, platform = process.pl
     }
   }
 
+  // Git for Windows walks into a directory junction as if it were a plain directory, so a file it
+  // lists can live outside the project. Each directory is resolved once.
+  async function insideProject(files) {
+    const dirs = new Map();
+    const kept = [];
+    for (const file of files) {
+      const dir = nodePath.posix.dirname(file);
+      if (!dirs.has(dir)) dirs.set(dir, await guard.locate(dir).then(() => true, () => false));
+      if (dirs.get(dir)) kept.push(file);
+    }
+    return kept;
+  }
+
   // Files under `path` as root-relative paths, plus the base that glob patterns are relative to.
   async function listFiles(path, includeIgnored) {
     const { abs, rel } = await guard.locate(path);
@@ -90,7 +103,8 @@ export function createSearchTools({ guard, legacyEncoding, platform = process.pl
         const { stdout } = await run("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", rel || "."], {
           cwd: guard.root, maxBuffer: 256 * 1024 * 1024, windowsHide: true, env: { ...process.env, GIT_LITERAL_PATHSPECS: "1" },
         });
-        return { files: [...new Set(stdout.split("\0").filter(Boolean))].slice(0, maxListedFiles), base: rel, viaGit: true };
+        const listed = [...new Set(stdout.split("\0").filter(Boolean))].slice(0, maxListedFiles);
+        return { files: await insideProject(listed), base: rel, viaGit: true };
       } catch {
         // Not a git work tree, or git is not installed.
       }
