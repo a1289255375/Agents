@@ -1,12 +1,13 @@
 // Command line options, and the state kept outside the repository (access token, last root, public address).
-import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import nodePath from "node:path";
-import { parseArgs, promisify } from "node:util";
+import { parseArgs } from "node:util";
 import { z } from "zod";
 import { newToken } from "./auth.mjs";
-import { encodingOfCodePage, legacyEncodings } from "./project/text.mjs";
+import { legacyEncodings } from "./project/text.mjs";
+
+export { detectEncodings } from "./project/codepage.mjs";
 
 export class ConfigError extends Error {}
 
@@ -146,21 +147,4 @@ export async function resolveToken(state, { env = process.env, renew = false } =
   const token = newToken();
   await state.save({ token });
   return { token, source: "new" };
-}
-
-// Files and console output on Windows may use the system code pages: ACP for files, OEMCP for consoles.
-export async function detectEncodings(platform = process.platform) {
-  let ansi;
-  let oem;
-  if (platform === "win32") {
-    try {
-      const { stdout } = await promisify(execFile)("reg", ["query", "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Nls\\CodePage"], { windowsHide: true });
-      const labelOf = (name) => encodingOfCodePage(Number(new RegExp(`\\b${name}\\s+REG_SZ\\s+(\\d+)`).exec(stdout)?.[1]));
-      ansi = labelOf("ACP");
-      oem = labelOf("OEMCP");
-    } catch {}
-  }
-  // No usable code page (UTF-8 system locale, not Windows): GBK is the likeliest encoding of a stray legacy file here.
-  const legacyEncoding = ansi ?? "gbk";
-  return { legacyEncoding, consoleEncoding: oem ?? legacyEncoding };
 }

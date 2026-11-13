@@ -118,6 +118,8 @@ export function createSearchTools({ guard, legacyEncoding, platform = process.pl
   const noFilesHint = (viaGit) => viaGit ? "（被 .gitignore 忽略的文件不在范围内，需要时设置 includeIgnored: true）" : "";
 
   return {
+    listFiles,
+
     async findFiles({ pattern, path = ".", limit = 200, includeIgnored = false }) {
       const matcher = globToRegExp(pattern, ignoreCase);
       const { files, base, viaGit } = await listFiles(path, includeIgnored);

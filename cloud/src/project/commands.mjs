@@ -3,6 +3,8 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import nodePath from "node:path";
+import { changeCount, formatChanges } from "./changes.mjs";
+import { displayArgv, programLaunch } from "./programs.mjs";
 import { decodeOutputLine } from "./text.mjs";
 
 const maxCommandChars = 8000;
@@ -12,10 +14,13 @@ const maxPendingBytes = 64 * 1024;
 const partialFlushMs = 500;
 const exitGraceMs = 1000;
 const outputNotifyMs = 300;
-const maxRunning = 8;
+const maxRunning = 16;
 const maxFinished = 50;
 const reportChars = 30_000;
 const reportHeadChars = 5000;
+const streamTailChars = 64_000;
+const annexChars = 6000;
+const directShell = "direct";
 const finalStates = new Set(["exited", "timeout", "stopped", "denied", "expired", "failed"]);
 
 export class CommandError extends Error {}
@@ -92,8 +97,10 @@ function lineDecoder(encoding, emit) {
 
 const seconds = (ms) => `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} 秒`;
 
+// `tracker` (see changes.mjs) is optional: with it, every finished command also reports the files it touched.
 export function createCommandRunner({
   guard, platform = process.platform, consoleEncoding, policy: initialPolicy, waitMs, approvalStaleMs = 120_000, onChange = () => {},
+  tracker, approvalPlace = "网页控制台",
 }) {
   const { defaultShell, shells } = shellsFor(platform);
   const jobs = new Map();
@@ -103,7 +110,7 @@ export function createCommandRunner({
 
   const isFinal = (job) => finalStates.has(job.state);
   const isStale = (job) => job.watchers === 0 && Date.now() - job.polledAt > approvalStaleMs;
-  const allowKey = (job) => `${job.shell}\n${job.command}`;
+  const allowKey = (job) => `${job.shell}\n${job.command}\n${JSON.stringify(job.env ?? {})}`;
 
   function changed(job) {
     for (const wake of [...job.wakers]) wake();
@@ -140,34 +147,66 @@ export function createCommandRunner({
       settle(job, "failed", { error: `同时运行的命令已达上限 ${maxRunning} 个，请先等待或用 stop_command 终止其中一些` });
       return;
     }
-    const [file, args, options] = shells[job.shell].launch(job.command);
-    const env = { ...process.env };
-    delete env.CLOUD_BRIDGE_TOKEN;
-    const child = spawn(file, args, { cwd: job.cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, ...options });
-    const append = (text) => {
+    Object.assign(job, { state: "running", startedAt: Date.now() });
+    if (!tracker) {
+      launch(job);
+      return;
+    }
+    changed(job);
+    // The listing has to be complete before the command can change anything.
+    tracker.snapshot().then((before) => { job.before = before; }, () => {}).then(() => {
+      if (isFinal(job)) return;
+      job.tracked = true;
+      launch(job);
+    });
+  }
+
+  function launch(job) {
+    let child;
+    try {
+      const env = { ...process.env, ...job.env };
+      delete env.CLOUD_BRIDGE_TOKEN;
+      const [file, args, options] = job.argv
+        ? programLaunch(job.argv, { platform, cwd: job.cwd, env })
+        : shells[job.shell].launch(job.command);
+      child = spawn(file, args, { cwd: job.cwd, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true, ...options });
+    } catch (error) {
+      settle(job, "failed", { error: error.message });
+      return;
+    }
+    const append = (stream) => (text) => {
       job.output += text;
       if (job.output.length > maxOutputChars) {
         job.dropped += job.output.length - keptOutputChars;
         job.output = job.output.slice(-keptOutputChars);
       }
+      stream.chars += text.length;
+      stream.tail = (stream.tail + text).slice(-streamTailChars);
       job.notify ??= setTimeout(() => {
         job.notify = undefined;
         onChange(view(job));
       }, outputNotifyMs);
     };
-    job.decoders = [child.stdout, child.stderr].map((stream) => {
-      const decoder = lineDecoder(consoleEncoding, append);
-      stream.on("data", decoder.push);
+    job.decoders = [[child.stdout, job.stdout], [child.stderr, job.stderr]].map(([pipe, stream]) => {
+      const decoder = lineDecoder(consoleEncoding, append(stream));
+      pipe.on("data", decoder.push);
       return decoder;
     });
-    Object.assign(job, { state: "running", startedAt: Date.now(), child });
+    job.child = child;
     job.timeout = setTimeout(() => {
       job.timedOut = true;
       killTree(child.pid);
     }, job.timeoutMs);
 
-    const exited = (code, signal) => settle(job, job.timedOut ? "timeout" : job.stopRequested ? "stopped" : "exited", { exitCode: code, signal });
-    child.once("error", (error) => settle(job, "failed", { error: error.message }));
+    const exited = (code, signal) => {
+      if (job.exiting || isFinal(job)) return;
+      job.exiting = true;
+      clearTimeout(job.timeout);
+      const finish = (changes) => settle(job, job.timedOut ? "timeout" : job.stopRequested ? "stopped" : "exited", { exitCode: code, signal, changes });
+      if (!job.tracked) finish();
+      else tracker.snapshot().then((after) => finish(tracker.diff(job.before, after)), () => finish());
+    };
+    child.once("error", (error) => settle(job, "failed", { error: error.code === "ENOENT" ? `找不到程序 ${job.argv?.[0] ?? error.path}` : error.message }));
     child.once("close", exited);
     // A background process started by the command can keep the pipes open long after the shell is gone.
     child.once("exit", (code, signal) => { job.grace = setTimeout(exited, exitGraceMs, code, signal); });
@@ -181,19 +220,39 @@ export function createCommandRunner({
   }
 
   function view(job) {
-    const { id, command, shell, cwdRel, session, state, exitCode, error, requestedAt, startedAt, endedAt, timeoutMs } = job;
+    const { id, command, shell, cwdRel, session, tool, state, exitCode, error, requestedAt, startedAt, endedAt, timeoutMs, changes } = job;
     return {
-      id, command, shell, cwd: cwdRel, session, state, exitCode, error, requestedAt, startedAt, endedAt, timeoutMs,
+      id, command, shell, cwd: cwdRel, session, tool, state, exitCode, error, requestedAt, startedAt, endedAt, timeoutMs, changes,
       waiting: job.watchers > 0, outputTail: job.output.slice(-4000), outputChars: job.dropped + job.output.length,
+      stdoutTail: job.stdout.tail.slice(-4000), stdoutChars: job.stdout.chars,
+      stderrTail: job.stderr.tail.slice(-4000), stderrChars: job.stderr.chars,
     };
   }
 
+  // What a finished command adds below its output: the stderr part on its own, and the files it touched.
+  function annex(job) {
+    const parts = [];
+    const { stdout, stderr } = job;
+    if (stderr.chars && !stdout.chars) {
+      parts.push("── 以上输出全部来自 stderr，stdout 为空 ──");
+    } else if (stderr.chars) {
+      const cut = stderr.chars > annexChars ? `，只显示末尾 ${annexChars} 个` : "";
+      parts.push(`── stderr 部分（共 ${stderr.chars} 个字符${cut}；上面的输出按时间合并了 stdout 和 stderr） ──\n${stderr.tail.slice(-annexChars).trimEnd()}`);
+    }
+    if (job.changes?.skipped || changeCount(job.changes)) {
+      const { added = [], modified = [], deleted = [] } = job.changes;
+      const counts = job.changes.skipped ? "" : `：新增 ${added.length}，修改 ${modified.length}，删除 ${deleted.length}（+ 新增，~ 修改，- 删除；被 .gitignore 忽略的文件不统计）`;
+      parts.push(`── 文件变更${counts} ──\n${formatChanges(job.changes)}`);
+    }
+    return parts;
+  }
+
   function describe(job, offset) {
-    const where = `${job.shell}，目录 ${job.cwdRel}`;
+    const where = `${job.shell === directShell ? "直接启动" : job.shell}，目录 ${job.cwdRel}`;
     const end = job.dropped + job.output.length;
     const ask = (args) => `command_status(${JSON.stringify({ jobId: job.id, ...args })})`;
     const headline = {
-      awaiting_approval: () => `等待用户在网页控制台确认这条命令（命令策略：每次确认）。调用 ${ask()} 继续等待，不要重复发起同一条命令。`,
+      awaiting_approval: () => `等待用户在${approvalPlace}确认这条命令（命令策略：每次确认）。调用 ${ask()} 继续等待，不要重复发起同一条命令。`,
       running: () => `仍在运行，已 ${seconds(Date.now() - job.startedAt)}（${where}）。调用 ${ask({ offset: end })} 继续等待和获取后续输出；不再需要时用 stop_command 终止。`,
       exited: () => `已结束，退出码 ${job.exitCode ?? `无（被信号 ${job.signal} 终止）`}，用时 ${seconds(job.endedAt - job.startedAt)}（${where}）`,
       timeout: () => `超过 ${job.timeoutMs / 1000} 秒仍未结束，已终止整个进程树（${where}）。确实需要更久时用更大的 timeoutSeconds 重新执行。`,
@@ -202,7 +261,7 @@ export function createCommandRunner({
       expired: () => "等待确认期间云端超过 2 分钟没有继续查询，这条命令已作废，没有执行。仍然需要时重新调用 run_command。",
       failed: () => `无法执行：${job.error}`,
     }[job.state]();
-    if (!job.startedAt) return `[${job.id}] ${headline}`;
+    if (!job.startedAt || job.state === "failed") return `[${job.id}] ${headline}`;
 
     const from = Math.max(offset, job.dropped);
     let output = job.output.slice(from - job.dropped);
@@ -214,7 +273,8 @@ export function createCommandRunner({
       output = `${output.slice(0, reportHeadChars)}\n…[此处省略 ${omitted} 个字符，可用 ${ask({ offset: from + reportHeadChars })} 读取]…\n${output.slice(-tail)}`;
     }
     const body = output || (offset > 0 ? "（没有新的输出）" : "（没有输出）");
-    return [`[${job.id}] ${headline}`, ...notes, body].join("\n");
+    const tail = isFinal(job) ? annex(job) : [];
+    return [`[${job.id}] ${headline}`, ...notes, tail.length ? body.trimEnd() : body, ...tail].join("\n");
   }
 
   return {
@@ -231,19 +291,27 @@ export function createCommandRunner({
       }
     },
 
-    async request({ command, cwd = ".", shell = defaultShell, timeoutSeconds = 600, session }) {
+    // Either `command` (a line for one of the shells) or `argv` (a program and its arguments, started
+    // without a shell). `tool` names the MCP tool the request came through, for the activity feed.
+    async request({ command, argv, env, cwd = ".", shell = defaultShell, timeoutSeconds = 600, session, tool = "run_command" }) {
       if (policy === "deny") {
         throw new CommandError("用户已禁用命令执行（命令策略：禁止）。只能使用文件工具；确实需要执行命令时，请在回复里告诉用户。");
       }
-      if (!shells[shell]) throw new CommandError(`这台电脑不支持 shell "${shell}"，可用：${Object.keys(shells).join("、")}`);
+      if (argv) {
+        shell = directShell;
+        command = displayArgv(argv);
+      } else if (!shells[shell]) {
+        throw new CommandError(`这台电脑不支持 shell "${shell}"，可用：${Object.keys(shells).join("、")}`);
+      }
       if (command.length > maxCommandChars) {
         throw new CommandError(`命令有 ${command.length} 个字符，超过 ${maxCommandChars} 的上限。请用 write_file 写成脚本文件再执行`);
       }
       const where = await guard.locate(cwd);
       if (!(await fs.promises.stat(where.abs)).isDirectory()) throw new CommandError(`cwd 不是目录：${where.rel}`);
       const job = {
-        id: `c${++counter}`, command, shell, cwd: where.abs, cwdRel: where.rel || ".", timeoutMs: timeoutSeconds * 1000, session,
+        id: `c${++counter}`, command, argv, env, shell, cwd: where.abs, cwdRel: where.rel || ".", timeoutMs: timeoutSeconds * 1000, session, tool,
         state: "awaiting_approval", output: "", dropped: 0, requestedAt: Date.now(), polledAt: Date.now(), watchers: 0, wakers: new Set(),
+        stdout: { tail: "", chars: 0 }, stderr: { tail: "", chars: 0 },
       };
       jobs.set(job.id, job);
       if (policy === "allow" || alwaysAllowed.has(allowKey(job))) start(job);
@@ -302,7 +370,9 @@ export function createCommandRunner({
       if (job.state === "awaiting_approval") settle(job, "stopped");
       if (job.state === "running") {
         job.stopRequested = true;
-        killTree(job.child.pid);
+        // No child yet: the project is still being listed for the file-change report.
+        if (job.child) killTree(job.child.pid);
+        else settle(job, "stopped");
       }
     },
 
@@ -310,7 +380,7 @@ export function createCommandRunner({
 
     shutdown() {
       for (const job of jobs.values()) {
-        if (job.state === "running") killTree(job.child.pid, true);
+        if (job.state === "running" && job.child) killTree(job.child.pid, true);
       }
     },
   };
