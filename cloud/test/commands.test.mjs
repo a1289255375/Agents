@@ -225,7 +225,8 @@ test("Windows: PowerShell and cmd run with correct exit codes and code pages", {
   // Console programs on Chinese Windows write GBK; PowerShell writes whatever [Console]::OutputEncoding says.
   assert.match(await run("[Console]::OutputEncoding = [Text.Encoding]::GetEncoding(936); Write-Output '中文输出，标点。'"), /\n中文输出，标点。\n$/);
   assert.match(await run("[Console]::OutputEncoding = [Text.Encoding]::UTF8; Write-Output '中文输出 ✓'"), /\n中文输出 ✓\n$/);
-  assert.match(await run("chcp 936 >nul & echo 中文输出", { shell: "cmd" }), /\n中文输出\n$/);
+  // cmd picks its output code page when it starts, so the inner cmd is the one that behaves like a Chinese system.
+  assert.match(await run("chcp 936 >nul & cmd /d /c echo 中文输出", { shell: "cmd" }), /\n中文输出\n$/);
 
   assert.match(await run("echo one&& echo two", { shell: "cmd" }), /\none\ntwo\n$/);
   assert.match(await run("exit /b 5", { shell: "cmd" }), /退出码 5，.*（cmd，目录 \.）/s);

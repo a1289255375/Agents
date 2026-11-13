@@ -32,13 +32,12 @@ test("launcher: start-cloud.cmd passes its arguments through to the program", { 
   const base = await tempDir(t);
   const missing = typed(`"${launcher}" "${base}\\no such dir\\"`);
   assert.equal(await missing.exited, 1, missing.output.text);
-  t.diagnostic(`trailing backslash: ${missing.output.text}`);
   assert.match(missing.output.text, /no such dir\r?\n/);
 
+  // Through PowerShell 5.1 the options after such a path survive as well.
   const followed = typed(`"${launcher}" "${base}\\no such dir\\" --command-policy allow`);
   assert.equal(await followed.exited, 1, followed.output.text);
-  t.diagnostic(`trailing backslash, then options: ${followed.output.text}`);
-  assert.match(followed.output.text, /no such dir(" --command-policy allow)?\r?\n/);
+  assert.match(followed.output.text, /no such dir\r?\n/);
 });
 
 test("launcher: start-cloud.ps1 starts the bridge on a path with spaces and Chinese characters", { skip: !windows, timeout: 120_000 }, async (t) => {
