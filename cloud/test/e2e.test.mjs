@@ -440,8 +440,8 @@ test("shell wait: the curl poll delivers the same events with its own narrow tic
   // A loop of short polls: 2 seconds in all, each request answered within the wait budget.
   assert.equal(bind.shellWait.blockMs, 62_000);
   assert.equal(bind.shellWait.command, `end=$(($(date +%s)+2)); n=0; while :; do `
-    + `r=$(curl -sS -m 31 -H 'Authorization: Bearer ${ticket}' "${waitUrl}?loop=$$-$end" 2>&1); `
-    + `case $r in '{"event":"idle"'*) n=0;; '{"event":"'*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
+    + `r=$(curl -sS -m 31 -H 'Authorization: Bearer ${ticket}' '${waitUrl}?loop='$$-$end 2>&1); `
+    + `case $r in '{'?event?:?idle?*) n=0;; '{'?event?:?*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
     + `[ $(date +%s) -ge $end ] && break; done; printf '%s\\n' "$r" | tail -n 1`);
   assert.match(bind.shellWait.instruction, /不要放进后台或 tmux.*不小于 blockMs 毫秒.*或 2 秒到时/);
 
@@ -581,7 +581,7 @@ test("shell wait is offered only when the public address is known and can be swi
 
   // A tunnel that keeps the public host name: the address is taken from the request.
   const forwarded = await viaTunnel({ "X-Forwarded-Host": "abc-def.trycloudflare.com", "X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.9" });
-  assert.ok(forwarded.shellWait.command.includes(` "https://abc-def.trycloudflare.com/wait/${forwarded.id}?loop=$$-$end" 2>&1)`));
+  assert.ok(forwarded.shellWait.command.includes(` 'https://abc-def.trycloudflare.com/wait/${forwarded.id}?loop='$$-$end 2>&1)`));
   // A tunnel that rewrites the host to localhost: unknown address, so only wait_message is offered.
   assert.equal((await viaTunnel({ "X-Forwarded-For": "203.0.113.9" })).shellWait, undefined);
   // A host name that could break out of the shell command is never used.
@@ -617,7 +617,7 @@ test("the public address is checked against this very process", async (t) => {
   // With a known public address the shell wait uses it, whatever host the request came in on.
   const { call } = await connectAgent();
   const bind = (await call("connect_session")).data;
-  assert.ok(bind.shellWait.command.includes(`"${base}/wait/${bind.id}?loop=`));
+  assert.ok(bind.shellWait.command.includes(`'${base}/wait/${bind.id}?loop='`));
 
   // Another bridge, a foreign server and a dead address are told apart.
   const other = await setup(t);

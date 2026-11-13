@@ -44,14 +44,16 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
   // Three failed polls in a row end the loop, so an unreachable address sends the agent back to
   // wait_message within seconds instead of leaving it deaf until the deadline. Each run of the
   // command names itself (shell pid and deadline), so the hub can tell its polls from a later run's.
+  // The agent copies the command out of a JSON string, so everything before the final printf avoids
+  // double quotes and backslashes: the case patterns match the quotes of {"event":"idle" with `?`.
   function shellWait(id, explain) {
     const url = config.shellWaitMs && waitUrl(id);
     // The address comes from request headers or user input and ends up inside a shell command.
     if (!url || !/^[\w.~:/[\]%-]+$/.test(url)) return undefined;
-    const poll = `curl -sS -m ${Math.ceil(config.waitMs / 1000) + 30} -H 'Authorization: Bearer ${waitTicket(config.token, id)}' "${url}?loop=$$-$end" 2>&1`;
+    const poll = `curl -sS -m ${Math.ceil(config.waitMs / 1000) + 30} -H 'Authorization: Bearer ${waitTicket(config.token, id)}' '${url}?loop='$$-$end 2>&1`;
     return {
       command: `end=$(($(date +%s)+${Math.ceil(config.shellWaitMs / 1000)})); n=0; while :; do r=$(${poll}); `
-        + `case $r in '{"event":"idle"'*) n=0;; '{"event":"'*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
+        + `case $r in '{'?event?:?idle?*) n=0;; '{'?event?:?*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
         + `[ $(date +%s) -ge $end ] && break; done; printf '%s\\n' "$r" | tail -n 1`,
       blockMs: config.shellWaitMs + config.waitMs + 60_000,
       ...(explain && {
