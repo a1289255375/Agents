@@ -9,6 +9,7 @@
     "start": "node src/index.mjs",
     "web": "node src/index.mjs --web",
     "smoke": "node scripts/smoke.mjs",
+    "cloud": "node cloud/src/main.mjs",
     "test": "node --test \"cloud/test/*.test.mjs\""
   },
   "engines": {
