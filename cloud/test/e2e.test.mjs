@@ -151,9 +151,9 @@ test("drill: connect, wait, receive a task from the web page, change a file, rep
 
   const tools = (await client.listTools()).tools.map((tool) => tool.name);
   assert.deepEqual(tools, [
-    "connect_session", "wait_message", "reply_message", "report_progress", "disconnect_session",
+    "connect_session", "wait_message", "reply_message", "report_thinking", "report_progress", "disconnect_session",
     "project_info", "list_dir", "find_files", "search_text", "read_file", "write_file", "edit_file", "delete_path", "move_path",
-    "run_command", "command_status", "stop_command",
+    "run_command", "run_program", "run_tests", "command_status", "stop_command",
   ]);
 
   // connect_session returns at once with the call that starts the wait.
@@ -638,4 +638,38 @@ test("the public address is checked against this very process", async (t) => {
   assert.equal((await check("")).message, "已清除公网地址");
   assert.equal((await state()).bridge.publicUrl, null);
   assert.equal(remembered.at(-1), undefined);
+});
+
+test("drill: thinking, run_program and run_tests through the local bridge", async (t) => {
+  const { root, web, state, agent: connectAgent } = await setup(t, { policy: "allow" });
+  await writeTree(root, {
+    "package.json": JSON.stringify({ scripts: { test: "node say.js tests" } }),
+    "argv.js": "console.log(JSON.stringify(process.argv.slice(2))); console.error('warn'); require('fs').writeFileSync('out.txt', 'x');",
+  });
+  const { call } = await connectAgent();
+  const session = (await call("connect_session", { name: "新工具", key: "conv-1", meta: { conversation: "conv-1" } })).data.id;
+  // The same key comes back to the same session, with no id given.
+  assert.equal((await call("connect_session", { key: "conv-1" })).data.id, session);
+
+  await web(`/api/sessions/${session}/messages`, { method: "POST", body: { text: "跑一下" } });
+  assert.equal((await call("wait_message", { id: session })).data.event, "message");
+  assert.equal((await call("report_thinking", { id: session, text: "先跑程序再跑测试" })).data.event, "thinking");
+
+  const program = await call("run_program", { session, program: process.execPath, args: ["argv.js", "a b", "x&y"] });
+  assert.match(program.text, /^\[c1\] 已结束，退出码 0，.*（直接启动，目录 \.）\n\["a b","x&y"\]\n/s);
+  assert.match(program.text, /── stderr 部分.*\nwarn\n── 文件变更：新增 1，/s);
+
+  const tests = await call("run_tests", { session });
+  assert.match(tests.text, /^测试命令：npm test（依据 package\.json 的 test 脚本（npm））\n\[c2\] 已结束，退出码 0，/);
+  assert.match(tests.text, /said tests/);
+
+  assert.equal((await call("reply_message", { id: session, text: "都跑完了", thinking: "程序和测试都正常" })).data.event, "replied");
+  const view = await state(session);
+  assert.deepEqual(view.session.timeline.slice(2).map(({ role, text }) => [role, text]), [
+    ["user", "跑一下"], ["thinking", "先跑程序再跑测试"], ["thinking", "程序和测试都正常"], ["assistant", "都跑完了"],
+  ]);
+  assert.deepEqual(view.activity.map(({ tool, job }) => [tool, job.tool, job.exitCode]), [["run_program", "run_program", 0], ["run_tests", "run_tests", 0]]);
+  assert.deepEqual(view.activity[0].job.changes, { added: ["out.txt"], modified: [], deleted: [] });
+  assert.deepEqual([view.activity[0].job.stdoutTail, view.activity[0].job.stderrTail], ['["a b","x&y"]\n', "warn\n"]);
+  assert.equal(view.sessions[0].key, "conv-1");
 });

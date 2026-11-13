@@ -8,25 +8,26 @@ import { describeError } from "./project/files.mjs";
 import { legacyEncodings } from "./project/text.mjs";
 
 const heartbeatMs = 15_000;
-const taskInstruction = "message 是用户交给你的任务。用本服务的项目工具（read_file、edit_file、write_file、search_text、run_command 等）在用户的本地电脑上完成它，调用时带上 session 参数（当前会话 id）。耗时较长时用 report_progress 汇报进展。完成后调用 reply_message 发送结果，然后立即执行它返回的 nextCall 继续等待。不要结束当前这一轮。";
+const taskInstruction = "message 是用户交给你的任务。用本服务的项目工具（read_file、edit_file、write_file、search_text、run_command、run_program、run_tests 等）在用户的本地电脑上完成它，调用时带上 session 参数（当前会话 id）。开工前和每个关键步骤用 report_thinking 回传你的思考，耗时较长时用 report_progress 汇报进展。完成后调用 reply_message 发送结果（thinking 参数写这条任务你是怎么想、怎么做的），然后立即执行它返回的 nextCall 继续等待。不要结束当前这一轮。";
 const redeliveredInstruction = "这条消息之前已经投递过，但一直没有收到 reply_message。如果你已经处理过它，直接调用 reply_message 补发结果，不要重复执行；否则现在处理。";
 const idleInstruction = "暂时没有新消息，这不是错误。立即再次执行 nextCall 继续等待；不要输出说明，不要结束当前这一轮。";
 const shellIdleInstruction = "暂时没有新消息，这不是错误。原样重新执行同一条等待命令继续等待（不行就调用 nextCall）；不要输出说明，不要结束当前这一轮。";
-const disconnectedInstruction = "用户已经结束这个会话。停止等待，不要再调用 wait_message。";
+const disconnectedInstruction = "用户已经明确结束这个会话。停止等待，不要再调用 wait_message；这是唯一可以结束当前这一轮的情况。";
 const supersededInstruction = "这次等待已被同一会话更新的一次等待取代，不需要处理，也不要为它再发起等待。";
 
 const nextWait = (id) => ({ name: "wait_message", arguments: { id } });
 const duration = (ms) => (ms >= 120_000 ? `${Math.round(ms / 60_000)} 分钟` : `${Math.round(ms / 1000)} 秒`);
 
 // What a finished wait tells the agent. The wait_message tool and the shell-wait endpoint both use
-// it, so the two ways of waiting speak the same protocol.
-export function waitResult(id, result, via = "mcp") {
+// it, so the two ways of waiting speak the same protocol. `link` says whether the user's side of a
+// relay is connected; an idle wait passes it on so the agent can tell "no task yet" from "nobody there yet".
+export function waitResult(id, result, via = "mcp", link = undefined) {
   if (result.event === "message") {
     const { redelivered, ...message } = result;
     return { ...message, id, ...(redelivered && { redelivered }), instruction: redelivered ? redeliveredInstruction : taskInstruction };
   }
   if (result.event === "idle") {
-    return { event: "idle", id, instruction: via === "shell" ? shellIdleInstruction : idleInstruction, nextCall: nextWait(id) };
+    return { event: "idle", id, ...(link && { plugin: link }), instruction: via === "shell" ? shellIdleInstruction : idleInstruction, nextCall: nextWait(id) };
   }
   if (result.event === "disconnected") return { event: "disconnected", id, instruction: disconnectedInstruction };
   return { event: result.event, id, instruction: supersededInstruction };
@@ -34,9 +35,10 @@ export function waitResult(id, result, via = "mcp") {
 
 export function createMcpServer({ hub, project, config, waitUrl }) {
   const server = new McpServer({ name: "cursor-cloud-bridge", version: "1.0.0" }, {
-    instructions: "这是用户本地电脑上的项目桥。先调用 connect_session({})，再按返回的 nextCall 挂起等待用户在本地网页上下发的任务；项目工具直接读写用户本地项目里的文件、执行命令。",
+    instructions: "这是通往用户本地电脑的项目桥。先调用 connect_session({}) 报到，再按返回的 nextCall 挂起等待用户下发的任务；项目工具直接读写用户本地项目里的文件、执行命令、运行程序和测试。每条任务回复后立刻继续等待，不要结束当前这一轮。",
   });
   const { files, search, commands } = project;
+  const link = () => config.link?.();
 
   // The same wait as wait_message, run in the agent's own shell tool. One shell call can block for
   // many minutes, so an idle hour costs a few model calls, not dozens. The command is a loop of
@@ -75,9 +77,9 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
     });
   }
 
-  const sessionArg = z.string().optional().describe("当前会话 id（connect_session 返回的 id）。接入会话后请始终填写，网页才能把这次操作归到你的会话");
+  const sessionArg = z.string().optional().describe("当前会话 id（connect_session 返回的 id）。接入会话后请始终填写，用户才能看到这次操作属于你的会话");
 
-  // `run` returns { text, record }: text goes to the agent, record to the console's activity feed.
+  // `run` returns { text, record }: text goes to the agent, record to the activity feed the user sees.
   function projectTool(name, description, inputSchema, run, annotations) {
     server.registerTool(name, { description, inputSchema: { ...inputSchema, session: sessionArg }, annotations }, async ({ session, ...args }, extra) => {
       const owner = hub.attribute(session);
@@ -101,19 +103,23 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
 
   sessionTool(
     "connect_session",
-    "接入用户的本地网页控制台，成为一个可以接收指令的会话。调用 connect_session({}) 会立即返回 event=bind 和 nextCall；随后立刻执行 nextCall 挂起等待网页消息。断线或服务重启后，可以带上原来的 id 重新接入同一个会话。",
+    "报到：告诉用户“我已经创建好了”，成为一个可以接收指令的会话。创建完毕后第一件事就调用它。调用 connect_session({}) 会立即返回 event=bind 和 nextCall；随后立刻执行 nextCall 挂起等待用户的指令。断线或服务重启后，可以带上原来的 id 或 key 重新接入同一个会话。",
     {
-      name: z.string().trim().min(1).max(60).optional().describe("显示在网页上的会话名称，可不填"),
+      name: z.string().trim().min(1).max(60).optional().describe("显示给用户的会话名称，可不填"),
       id: idArg.optional().describe("要重新接入的原会话 id；新会话不填"),
+      key: z.string().trim().min(1).max(200).optional().describe("调用方的固定标识，例如对话 id。带同一个 key 再次调用会回到同一个会话，即使已经不记得会话 id"),
+      meta: z.record(z.string().max(40), z.string().max(300)).optional().describe("显示在会话旁的附加信息，例如对话 id、所在主机"),
     },
-    ({ id, name }) => {
-      const session = hub.connect({ id, name });
+    ({ id, name, key, meta }) => {
+      const session = hub.connect({ id, name, key, meta });
+      const plugin = link();
       return {
         event: "bind",
         id: session.id,
         name: session.name,
+        ...(plugin && { plugin }),
         project: project.info(),
-        instruction: "已接入。立即执行 nextCall 挂起等待网页消息；之后所有项目工具调用都带上 session 参数（即这里的 id）。",
+        instruction: "已接入。立即执行 nextCall 挂起等待用户的指令；之后所有项目工具调用都带上 session 参数（即这里的 id）。",
         nextCall: nextWait(session.id),
         shellWait: shellWait(session.id, true),
       };
@@ -122,7 +128,7 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
 
   sessionTool(
     "wait_message",
-    `挂起等待下一条网页消息，最长约 ${duration(config.waitMs)}。event=message：message 是用户交给你的任务，完成后调用 reply_message。event=idle：暂时没有消息（不是错误），立即再次调用 wait_message。event=disconnected：用户已结束会话，停止等待。`,
+`挂起等待用户的下一条指令，最长约 ${duration(config.waitMs)}。event=message：message 是用户交给你的任务，完成后调用 reply_message。event=idle：暂时没有消息（不是错误），立即再次调用 wait_message，无论重复多少次。event=disconnected：用户已明确结束会话，停止等待。`,
     { id: idArg },
     async ({ id }, { signal, _meta, sendNotification }) => {
       const progressToken = _meta?.progressToken;
@@ -132,7 +138,7 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
         void sendNotification({ method: "notifications/progress", params: { progressToken, progress: ++progress } }).catch(() => {});
       }, heartbeatMs);
       try {
-        return waitResult(id, await hub.wait(id, { signal, holdMs: config.waitMs, via: "mcp" }));
+        return waitResult(id, await hub.wait(id, { signal, holdMs: config.waitMs, via: "mcp" }), "mcp", link());
       } finally {
         clearInterval(heartbeat);
       }
@@ -141,10 +147,14 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
 
   sessionTool(
     "reply_message",
-    "把任务结果或对用户问题的答复发到网页。随后立刻执行返回的 nextCall 继续等待下一条消息。",
-    { id: idArg, text: z.string().trim().min(1).max(100000).describe("发给用户的内容，支持 Markdown") },
-    ({ id, text }) => {
-      const result = hub.reply(id, text);
+    "把任务结果或对用户问题的答复发给用户，并附上这条任务的思考过程。随后立刻执行返回的 nextCall 继续等待下一条消息。",
+    {
+      id: idArg,
+      text: z.string().trim().min(1).max(100000).describe("发给用户的内容，支持 Markdown"),
+      thinking: z.string().trim().min(1).max(50000).optional().describe("这条任务的思考过程：怎么理解需求、做了哪些判断和取舍、还有什么不确定。用户会在结果上方看到"),
+    },
+    ({ id, text, thinking }) => {
+      const result = hub.reply(id, text, thinking);
       if (result.event === "disconnected") return waitResult(id, result);
       const viaShell = shellWait(id, false);
       return {
@@ -162,8 +172,19 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
   );
 
   sessionTool(
+    "report_thinking",
+    "把你此刻的思考回传给用户：对需求的理解、打算怎么做、为什么这样判断、遇到的疑点。开工前和每个关键步骤调用一次。它不结束任务，也不需要等待回复。",
+    { id: idArg, text: z.string().trim().min(1).max(20000).describe("思考内容") },
+    ({ id, text }) => {
+      const result = hub.think(id, text);
+      if (result.event === "disconnected") return waitResult(id, result);
+      return { event: "thinking", id, sent: true, ...(result.queued && { note: `用户又发来 ${result.queued} 条消息，当前任务回复后会在 wait_message 收到。` }) };
+    },
+  );
+
+  sessionTool(
     "report_progress",
-    "任务耗时较长时，把当前进展发到网页给用户看。它不结束任务，也不需要等待回复。",
+    "任务耗时较长时，把当前进展发给用户看。它不结束任务，也不需要等待回复。",
     { id: idArg, text: z.string().trim().min(1).max(20000).describe("进展说明") },
     ({ id, text }) => {
       const result = hub.progress(id, text);
@@ -174,7 +195,7 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
 
   sessionTool(
     "disconnect_session",
-    "结束这个会话的网页等待。只在用户明确要求结束时调用。",
+    "结束这个会话的等待。只在用户明确要求结束时调用。",
     { id: idArg },
     ({ id }) => {
       hub.disconnect(id, "agent");
@@ -290,23 +311,58 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
   );
 
   const commandWaitSeconds = Math.round(config.commandWaitMs / 1000);
+  // Before the user's side of a relay has connected, the shells of that machine are not known yet.
+  const shellNames = Object.keys(commands.shells);
+  const defaultShell = commands.defaultShell ? `${commands.defaultShell}（${commands.shells[commands.defaultShell]}）` : "由用户的电脑决定（用 project_info 查看）";
+  const jobRules = `一次调用最多等待约 ${commandWaitSeconds} 秒：到时还没结束，就返回已有输出和编号，再用 command_status 继续等待。命令策略是“每次确认”时，要先由用户在本地批准，期间按返回的提示调用 command_status。结束时返回退出码、按时间合并的输出、单独列出的 stderr 部分（stderr 为空就没有这一段）和运行期间的文件变更。标准输入是关闭的，不要运行需要键盘交互的程序。`;
+  const timeoutArg = (seconds) => z.number().int().min(1).max(86_400).default(seconds).describe(`超过这个时间就终止整个进程树，默认 ${seconds} 秒`);
+
   projectTool(
     "run_command",
-    `在用户本地电脑的项目目录里执行命令，默认 shell 是 ${commands.defaultShell}（${commands.shells[commands.defaultShell]}）。一次调用最多等待约 ${commandWaitSeconds} 秒：到时命令还没结束，就返回已有输出和编号，再用 command_status 继续等待。命令策略是“每次确认”时，命令要先由用户在网页上批准，期间按返回的提示调用 command_status。标准输入是关闭的，不要运行需要键盘交互的程序；开发服务器这类不会自己结束的进程，要设置足够大的 timeoutSeconds，用完后用 stop_command 终止。`,
+    `在用户本地电脑的项目目录里执行一行 shell 命令，默认 shell 是 ${defaultShell}。只是启动某个程序或跑测试时，优先用 run_program 和 run_tests，不用自己处理引号和转义。${jobRules}开发服务器这类不会自己结束的进程，要设置足够大的 timeoutSeconds，用完后用 stop_command 终止。`,
     {
       command: z.string().trim().min(1).describe("要执行的命令行"),
       cwd: pathArg("工作目录").default("."),
-      shell: z.enum(Object.keys(commands.shells)).optional().describe(`使用哪个 shell，默认 ${commands.defaultShell}`),
-      timeoutSeconds: z.number().int().min(1).max(86_400).default(600).describe("超过这个时间就终止整个进程树，默认 600 秒"),
+      shell: (shellNames.length ? z.enum(shellNames) : z.string()).optional().describe(`使用哪个 shell，默认 ${commands.defaultShell ?? "用户电脑的默认 shell"}`),
+      timeoutSeconds: timeoutArg(600),
     },
     async (args, { signal }, session) => ({ text: await commands.report(await commands.request({ ...args, session }), { signal }) }),
     { destructiveHint: true, openWorldHint: true },
   );
 
-  const jobArg = z.string().regex(/^c\d+$/, "命令编号形如 c1").describe("run_command 返回的命令编号，例如 c1");
+  projectTool(
+    "run_program",
+    `在用户本地电脑上启动一个程序，参数用数组给出，不经过 shell：每个参数原样传给程序，不需要引号和转义，也不会被解释成管道、重定向或变量。适合运行编译器、脚本解释器、包管理器、构建工具和项目自己的可执行文件。Windows 上程序名会按 PATHEXT 匹配 .exe、.cmd、.bat（例如 npm、gradlew）。需要管道或重定向时改用 run_command。${jobRules}`,
+    {
+      program: z.string().trim().min(1).describe("程序名（在工作目录和 PATH 里查找），或相对工作目录的路径"),
+      args: z.array(z.string()).max(200).default([]).describe("参数数组，每个元素是一个完整的参数"),
+      cwd: pathArg("工作目录").default("."),
+      env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/), z.string()).optional().describe("额外的环境变量"),
+      timeoutSeconds: timeoutArg(600),
+    },
+    async (args, { signal }, session) => ({ text: await commands.report(await project.programs.run({ ...args, session }), { signal }) }),
+    { destructiveHint: true, openWorldHint: true },
+  );
+
+  projectTool(
+    "run_tests",
+    `运行用户项目的测试。测试命令由本地决定：用户在本地设置里指定的命令优先，否则按项目文件自动识别（package.json 的 test 脚本、Cargo.toml、go.mod、.NET 项目、pom.xml、build.gradle、pytest、Makefile 的 test 目标），结果的第一行会写明实际执行的命令。${jobRules}`,
+    {
+      cwd: pathArg("在哪个目录里找测试并运行").default("."),
+      args: z.array(z.string()).max(100).default([]).describe("追加给测试命令的参数，例如只跑某个文件或用例的过滤条件"),
+      timeoutSeconds: timeoutArg(1800),
+    },
+    async (args, { signal }, session) => {
+      const { id, note } = await project.tests.run({ ...args, session });
+      return { text: `${note}\n${await commands.report(id, { signal })}` };
+    },
+    { destructiveHint: true, openWorldHint: true },
+  );
+
+  const jobArg = z.string().regex(/^c\d+$/, "命令编号形如 c1").describe("run_command、run_program 或 run_tests 返回的编号，例如 c1");
   projectTool(
     "command_status",
-    `继续等待一条命令（最多约 ${commandWaitSeconds} 秒），返回它的状态和 offset 之后的输出。`,
+    `继续等待一条命令、程序或测试（最多约 ${commandWaitSeconds} 秒），返回它的状态和 offset 之后的输出。`,
     {
       jobId: jobArg,
       offset: z.number().int().min(0).default(0).describe("从输出的第几个字符开始返回；按上一次结果里给出的值填写"),
@@ -317,7 +373,7 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
 
   projectTool(
     "stop_command",
-    "终止一条正在运行或等待确认的命令，连同它启动的整个进程树。",
+    "终止一条正在运行或等待确认的命令、程序或测试，连同它启动的整个进程树。",
     { jobId: jobArg },
     async ({ jobId }, { signal }) => {
       commands.stop(jobId);

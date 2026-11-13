@@ -117,6 +117,8 @@ h1 { margin: 0; font-size: 15px; font-weight: 600; }
 .message.note { color: var(--conversation-muted); font-size: 12px; text-align: center; }
 .message.progress { color: var(--conversation-muted); border-left: 2px solid #45454a; padding-left: 11px; font-size: 13px; }
 .message.progress .message-text::before { content: "进展  "; color: var(--busy); font-size: 12px; }
+.message.thinking { color: var(--conversation-muted); border-left: 2px dashed #45454a; padding-left: 11px; font-size: 13px; font-style: italic; }
+.message.thinking .message-text::before { content: "思考  "; color: var(--conversation-muted); font-size: 12px; font-style: normal; }
 .delivery-status { display: block; color: var(--conversation-muted); font-size: 11px; text-align: right; }
 .delivery-status.undelivered { color: var(--danger); }
 .response > * { margin: 0; }

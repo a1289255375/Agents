@@ -7,7 +7,7 @@ import { randomBytes } from "node:crypto";
 
 export const sessionIdPattern = /^[0-9a-f]{8}$/;
 const graceMs = 15_000;
-const maxActivity = 300;
+const maxActivity = 1000;
 const maxTimeline = 500;
 
 export class SessionError extends Error {}
@@ -86,11 +86,11 @@ export function createHub({ now = Date.now } = {}) {
   }
 
   function summaryOf(session) {
-    const { id, name, createdAt, lastSeenAt, hint, closed } = session;
+    const { id, name, key, meta, createdAt, lastSeenAt, hint, closed, delivered, acked } = session;
     const last = session.timeline.findLast((item) => item.role !== "note");
     const wait = waitOf(session);
     return {
-      id, name, createdAt, lastSeenAt, hint, closed,
+      id, name, key, meta, createdAt, lastSeenAt, hint, closed, delivered, acked,
       status: statusOf(session),
       queued: session.inbox.filter((message) => message.seq > session.delivered).length,
       waiting: wait && { via: wait.via, since: wait.startedAt, holdMs: wait.holdMs },
@@ -104,14 +104,18 @@ export function createHub({ now = Date.now } = {}) {
     // For state the console shows but the hub does not own (command policy, public address).
     notify: changed,
 
-    connect({ id, name }) {
-      let session = id && sessions.get(id);
+    // `key` is whatever identifies the caller for good (its conversation id): the same key always
+    // comes back to the same session, even when the agent has forgotten the session id.
+    connect({ id, name, key, meta }) {
+      let session = (id && sessions.get(id)) || (key && [...sessions.values()].find((other) => other.key === key));
       if (session) {
         if (name) session.name = name;
         addToTimeline(session, "note", "云端 Agent 重新接入");
       } else {
         session = create(id ?? randomBytes(4).toString("hex"), name, "云端 Agent 已接入");
       }
+      if (key) session.key = key;
+      if (meta) session.meta = meta;
       closedIds.delete(session.id);
       session.closed = undefined;
       session.idling = undefined;
@@ -167,11 +171,12 @@ export function createHub({ now = Date.now } = {}) {
       });
     },
 
-    reply(id, text) {
+    reply(id, text, thinking) {
       const session = forAgent(id);
       if (!session) return { event: "disconnected" };
       // A retried call must not show the same answer twice.
       const duplicate = session.lastReply?.text === text && session.lastReply.delivered === session.delivered;
+      if (!duplicate && thinking) addToTimeline(session, "thinking", thinking);
       if (!duplicate) addToTimeline(session, "assistant", text);
       session.lastReply = { text, delivered: session.delivered };
       session.acked = session.delivered;
@@ -186,6 +191,16 @@ export function createHub({ now = Date.now } = {}) {
       addToTimeline(session, "progress", text);
       changed();
       return { event: "progress", queued: session.inbox.filter((message) => message.seq > session.delivered).length };
+    },
+
+    // What the agent says about its own reasoning. The platform does not hand out the raw chain of
+    // thought, so this is the part of it the console can show.
+    think(id, text) {
+      const session = forAgent(id);
+      if (!session) return { event: "disconnected" };
+      addToTimeline(session, "thinking", text);
+      changed();
+      return { event: "thinking", queued: session.inbox.filter((message) => message.seq > session.delivered).length };
     },
 
     disconnect(id, by) {
@@ -240,7 +255,7 @@ export function createHub({ now = Date.now } = {}) {
     // One activity entry per command job, updated in place as the job produces output and ends.
     recordJob(job) {
       const item = activity.findLast((entry) => entry.job?.id === job.id);
-      if (!item) return this.record({ session: job.session, tool: "run_command", target: job.command, job });
+      if (!item) return this.record({ session: job.session, tool: job.tool ?? "run_command", target: job.command, job });
       item.job = job;
       item.rev = changed();
       return item;

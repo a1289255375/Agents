@@ -20,7 +20,7 @@ const deliveryLabels = { queued: "排队中，等云端领取", delivered: "已�
 const toolLabels = {
   project_info: "项目信息", list_dir: "列目录", find_files: "查找文件", search_text: "搜索", read_file: "读取",
   write_file: "写入", edit_file: "修改", delete_path: "删除", move_path: "移动", run_command: "命令",
-  command_status: "命令状态", stop_command: "终止命令",
+  run_program: "程序", run_tests: "测试", command_status: "命令状态", stop_command: "终止命令",
 };
 const jobLabels = {
   awaiting_approval: "等待你确认", running: "运行中", timeout: "超时已终止", stopped: "已终止",
@@ -443,6 +443,10 @@ function addActivity(node, { tool, ok, target, summary, diff, detail: result, er
     stop.type = "button";
     stop.addEventListener("click", () => jobAction(stop, `/api/jobs/${job.id}/stop`));
   }
+  if (job.stderrChars && job.stdoutChars) addToolSection(card, "其中 stderr 的部分", job.stderrTail, "job-output");
+  const { added = [], modified = [], deleted = [], skipped } = job.changes ?? {};
+  const changed = [...added.map((file) => `+ ${file}`), ...modified.map((file) => `~ ${file}`), ...deleted.map((file) => `- ${file}`)];
+  if (skipped || changed.length) addToolSection(card, "文件变更（+ 新增，~ 修改，- 删除）", skipped ?? changed.join("\n"));
 }
 
 function buildItem(item) {

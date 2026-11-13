@@ -298,3 +298,45 @@ test("watch resolves on the next change, on timeout and on abort", async () => {
   hub.notify();
   assert.ok(hub.revision > revision + 1);
 });
+
+test("a key always leads back to the same session", () => {
+  const hub = createHub();
+  const first = hub.connect({ name: "甲", key: "conversation-1", meta: { conversation: "conversation-1" } });
+  const other = hub.connect({ key: "conversation-2" });
+  assert.notEqual(first.id, other.id);
+
+  const again = hub.connect({ key: "conversation-1" });
+  assert.equal(again.id, first.id);
+  assert.equal(again.name, "甲");
+  assert.deepEqual(hub.summaries().map(({ key, meta }) => [key, meta?.conversation]), [["conversation-2", undefined], ["conversation-1", "conversation-1"]]);
+  assert.deepEqual(roles(hub, first.id), ["note:云端 Agent 已接入", "note:云端 Agent 重新接入"]);
+
+  // A session the user ended opens again for the same caller; a deleted one starts afresh.
+  hub.disconnect(first.id, "user");
+  assert.equal(hub.connect({ key: "conversation-1" }).id, first.id);
+  assert.equal(hub.detail(first.id).status, "active");
+  hub.remove(first.id);
+  assert.notEqual(hub.connect({ key: "conversation-1" }).id, first.id);
+});
+
+test("thinking is kept in the timeline, on its own and in front of a reply", async () => {
+  const hub = createHub();
+  const { id } = hub.connect({});
+  hub.send(id, "修复登录");
+  hub.wait(id, hold);
+  assert.deepEqual(hub.think(id, "先看 auth.js"), { event: "thinking", queued: 0 });
+  hub.send(id, "第二件事");
+  assert.deepEqual(hub.think(id, "问题在令牌过期判断"), { event: "thinking", queued: 1 });
+  assert.deepEqual(hub.reply(id, "修好了", "改了过期判断，补了测试"), { event: "replied", queued: 1 });
+  // A retried reply shows neither the answer nor its thinking twice.
+  hub.reply(id, "修好了", "改了过期判断，补了测试");
+  assert.deepEqual(roles(hub, id).slice(1), [
+    "user:修复登录:done", "thinking:先看 auth.js", "user:第二件事:queued", "thinking:问题在令牌过期判断",
+    "thinking:改了过期判断，补了测试", "assistant:修好了",
+  ]);
+  assert.deepEqual([hub.detail(id).delivered, hub.detail(id).acked], [1, 1]);
+  assert.equal(hub.summaries()[0].preview, "修好了");
+
+  hub.disconnect(id, "user");
+  assert.deepEqual(hub.think(id, "太晚了"), { event: "disconnected" });
+});
