@@ -166,6 +166,7 @@ export function createCommandRunner({
     try {
       const env = { ...process.env, ...job.env };
       delete env.CLOUD_BRIDGE_TOKEN;
+      delete env.CURSOR_API_KEY;
       const [file, args, options] = job.argv
         ? programLaunch(job.argv, { platform, cwd: job.cwd, env })
         : shells[job.shell].launch(job.command);

@@ -319,24 +319,27 @@ test("a key always leads back to the same session", () => {
   assert.notEqual(hub.connect({ key: "conversation-1" }).id, first.id);
 });
 
-test("thinking is kept in the timeline, on its own and in front of a reply", async () => {
+test("thinking deltas of one block grow one timeline item", async () => {
   const hub = createHub();
   const { id } = hub.connect({});
   hub.send(id, "修复登录");
   hub.wait(id, hold);
-  assert.deepEqual(hub.think(id, "先看 auth.js"), { event: "thinking", queued: 0 });
+  hub.think(id, "先看", 0);
+  hub.think(id, " auth.js", 0);
+  // A message that arrives in the middle of a block splits it where it landed.
   hub.send(id, "第二件事");
-  assert.deepEqual(hub.think(id, "问题在令牌过期判断"), { event: "thinking", queued: 1 });
-  assert.deepEqual(hub.reply(id, "修好了", "改了过期判断，补了测试"), { event: "replied", queued: 1 });
-  // A retried reply shows neither the answer nor its thinking twice.
-  hub.reply(id, "修好了", "改了过期判断，补了测试");
+  hub.think(id, "，再看测试", 0);
+  hub.think(id, "问题在令牌过期判断", 1);
+  hub.note(id, "读不到思考");
+  assert.deepEqual(hub.reply(id, "修好了"), { event: "replied", queued: 1 });
   assert.deepEqual(roles(hub, id).slice(1), [
-    "user:修复登录:done", "thinking:先看 auth.js", "user:第二件事:queued", "thinking:问题在令牌过期判断",
-    "thinking:改了过期判断，补了测试", "assistant:修好了",
+    "user:修复登录:done", "thinking:先看 auth.js", "user:第二件事:queued", "thinking:，再看测试",
+    "thinking:问题在令牌过期判断", "note:读不到思考", "assistant:修好了",
   ]);
-  assert.deepEqual([hub.detail(id).delivered, hub.detail(id).acked], [1, 1]);
   assert.equal(hub.summaries()[0].preview, "修好了");
 
+  assert.equal(hub.isOpen(id), true);
   hub.disconnect(id, "user");
-  assert.deepEqual(hub.think(id, "太晚了"), { event: "disconnected" });
+  assert.equal(hub.isOpen(id), false);
+  assert.equal(hub.isOpen("00000000"), false);
 });

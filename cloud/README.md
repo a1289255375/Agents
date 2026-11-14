@@ -71,9 +71,14 @@ node cloud/extension/build.mjs --out D:\tmp\ccb.vsix  # 指定输出路径
 
 ### 5. 一次起多个 Cloud Agent，看思考过程
 
-在 cursor.com/agents 对每个新建的 Cloud Agent 都发同一份提示词即可；一个插件可同时接住约十个云端会话，左侧列表并列显示，各自独立下指令。选中某个会话，对话区会按时间显示它的 `report_thinking` 思考、`report_progress` 进展、读写了哪些文件（带差异）、执行了什么命令和输出、以及 `reply_message` 的回复和它附带的思考。
+在 cursor.com/agents 对每个新建的 Cloud Agent 都发同一份提示词即可；一个插件可同时接住约十个云端会话，左侧列表并列显示，各自独立下指令。选中某个会话，对话区会按时间显示它的思考、`report_progress` 进展、读写了哪些文件（带差异）、执行了什么命令和输出、以及 `reply_message` 的回复。
 
-**关于“思考过程”的界限**：Cursor 平台不会把 Cloud Agent 的原始思维链交给第三方 MCP 服务，本插件也拿不到。控制台展示的“思考”，是子代理通过 `report_thinking` 和 `reply_message` 的 `thinking` 参数**主动回传**的内容，加上它调用项目工具的真实步骤（读写文件、命令及输出）。提示词已要求它开工前和每个关键步骤回传思考，但具体回传多少取决于模型是否照做。
+**思考从哪里来**：就是 cursor.com/agents 聊天界面上能看到的那份思考，云端桥从 Cursor 的 [Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints) 读取（`GET /v1/agents/{id}/stream` 里的 `thinking` 事件），子代理不需要、也不会为此多写什么。要让它出现，需要两样东西：
+
+- 在本机给云端桥设置环境变量 `CURSOR_API_KEY`（在 Cursor 控制台 → API Keys 生成），设好后重启 IDE 或 `start-cloud.cmd`。没设置时桥照常工作，只是不显示思考，输出里会提示一次。这个变量不会传给子代理在本机执行的命令。
+- 子代理用 Shell 等待（提示词默认就这么做）。等待命令会带上云端 Shell 里现成的 `CURSOR_CONVERSATION_ID`（就是这个 Cloud Agent 的 id），桥据此订阅它的思考。一直只用 `wait_message` 等待的会话，桥不知道它是哪个 Cloud Agent，就读不到思考。
+
+API key 读不到这个 Agent（密钥错、Agent 属于别的账号或已归档）时，会话里会出现一条说明和 Cursor 返回的 HTTP 状态。思考的有无和多少取决于模型本身是否输出可见思考。
 
 ### 插件设置项（`cursorCloudBridge.*`）
 
@@ -90,7 +95,7 @@ node cloud/extension/build.mjs --out D:\tmp\ccb.vsix  # 指定输出路径
 
 ### 插件验证到哪一步
 
-- 在本仓库的 Linux 开发机上：用插件的控制器代码（`extension/lib/controller.mjs`）在固定端口起桥，十个 MCP 客户端扮演子代理并列接入，走通“下指令 → 回传思考 → 读文件 → 改文件（差异）→ 请求执行命令 → 逐条确认 → 命令输出 → 回复 → 再次挂起”整条循环，并在 Chrome 里截图录屏；把打包好的 `.vsix` 解压后，用它自带的 `extension.js` 在打包布局下成功起桥、读到 `web/` 与 `prompt.md` 资产。
+- 在本仓库的 Linux 开发机上：用插件的控制器代码（`extension/lib/controller.mjs`）在固定端口起桥，十个 MCP 客户端扮演子代理并列接入，走通“下指令 → 读文件 → 改文件（差异）→ 请求执行命令 → 逐条确认 → 命令输出 → 回复 → 再次挂起”整条循环，并在 Chrome 里截图录屏；把打包好的 `.vsix` 解压后，用它自带的 `extension.js` 在打包布局下成功起桥、读到 `web/` 与 `prompt.md` 资产。
 - 没有在真实 Windows 的 Cursor / VS Code 里装过这个 vsix、也没在 IDE 的 webview 面板里实测内嵌 iframe（本环境没有带界面的 IDE）。内嵌面板依赖桌面版 IDE 的 `asExternalUri` 把本机端口暴露给 webview；万一面板空白，用 **在浏览器中打开控制台** 一定可用。
 
 ## 从零开始
@@ -378,6 +383,7 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 
 环境变量：
   CLOUD_BRIDGE_TOKEN          指定访问令牌（至少 24 个字符）；不设置则自动生成并保存在状态目录
+  CURSOR_API_KEY              你的 Cursor API 密钥。设置后控制台从 Cursor 读取云端 Agent 的思考并显示
 ```
 
 `start-cloud.cmd` 会自动带上 `--open`。不用启动脚本时，先在仓库目录运行一次 `npm ci`，再运行 `node cloud\src\main.mjs "D:\work\my-project"`，或者 `npm run cloud -- "D:\work\my-project"`。
@@ -394,8 +400,9 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 | `wait_message` | 挂起等待下一条指令，返回 `message`、`idle` 或 `disconnected` |
 | `reply_message` | 把结果发到网页，并返回下一次等待要用的 `nextCall` |
 | `report_progress` | 任务进行中把进展发到网页 |
-| `report_thinking` | 把当前思考回传给用户，网页上单独显示；开工前和关键步骤各调用一次 |
 | `disconnect_session` | 结束这个会话的等待 |
+
+网页上的思考不经过这些工具，见[一次起多个 Cloud Agent，看思考过程](#5-一次起多个-cloud-agent看思考过程)。
 
 项目工具：`project_info`、`list_dir`、`find_files`、`search_text`、`read_file`、`write_file`、`edit_file`（精确替换）、`delete_path`、`move_path`、`run_command`、`run_program`、`run_tests`、`command_status`、`stop_command`。
 
@@ -414,8 +421,16 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 - MCP 服务鉴权失败时，那次运行的事件里会出现 `mcp_auth_error`，它的工具被跳过，运行继续。（[Capabilities](https://cursor.com/docs/cloud-agent/capabilities)）
 - Cloud Agent 的虚拟机默认可以访问互联网，可以配置出站白名单。（[Security & network](https://cursor.com/docs/cloud-agent/security-network)）
 - Cloud Agent 按所选模型的费率消耗方案用量；需要含 Cloud Agent 的方案；可以不带仓库启动（Start from scratch）。（[Cloud Agents](https://cursor.com/docs/cloud-agent)）
+- Cloud Agents API v1（公开测试版）的 `GET /v1/agents/{id}/stream` 以 SSE 推送 Agent 的 `thinking`（思考增量，`{ text }`）、`assistant`、`tool_call` 等事件，用 `Last-Event-ID` 续传，过了保留期返回 `410`；用用户或服务账号的 API key 鉴权。（[Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints)）
+
+以下是 2026-11-14 在一个 Cloud Agent 虚拟机上实际看到的，文档没有写：
+
+- Agent 的 Shell 环境里有 `CURSOR_CONVERSATION_ID`，值就是这个 Agent 的 id（`bc-…`）。
+- 查过但读不到思考的地方：虚拟机上 `AGENT_TRANSCRIPTS` 指向的目录不存在；Agent 自带的会话导出在运行中只有空的 `messages`。Hooks 的 `afterAgentThought` 文档说在 Cloud Agent 里会执行，但只认被操作的云端仓库里的 `.cursor/hooks.json`，要往那个仓库提交钩子和桥的地址、令牌，所以没有采用。
 
 **没有确认**
+
+- 没有用真实的 API key 读过 `thinking` 事件（开发环境没有 key），只按文档的事件格式用本地模拟的 SSE 服务测试。
 
 - cursor.com/agents 上添加 MCP 服务的界面具体有哪些输入框。上面第 4 步按“名称、URL、请求头”和 JSON 两种形式都给了，以实际界面为准。
 - Cursor 后端对单次 MCP 工具调用的超时上限。默认的 50 秒是按 MCP 客户端常见的 60 秒上限留的余量。
@@ -435,7 +450,7 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 - 经 cloudflared 快速隧道的全流程：接入、等待、下指令、改文件、确认命令、回复、再等待。扮演 Cloud Agent 的是官方 MCP SDK 的客户端。
 - 挂起等待：一个会话用 `wait_message` 经隧道连续挂了 30 分钟（空等返回 36 次，中间处理了一条指令）；Shell 等待命令在没有消息时挂满 20 分钟后返回 `idle`（实测 1204 秒）。
 - Shell 等待命令在 dash、bash、zsh、busybox ash 下运行；也由一个真实 Cloud Agent 的终端工具经隧道执行过，指令一到命令就返回。
-- 自建中继全流程：把中继用 `deploy.sh --insecure-http` 部署到一台真实的公网 Linux 服务器（systemd、非 root 运行），开发机上的云端桥以中继模式主动连上去，官方 MCP SDK 客户端经 `http://<服务器IP>:18443/mcp` 列工具、开两个会话、下指令、回传思考、改文件、`run_command` 拿到 stdout/stderr/退出码、回复。其中一次 `wait_message` 经公网中继实测挂满 50.6 秒才返回 `idle`（**没有被缓冲**，期间下的指令约 0.9 秒就送达）；把中继服务重启一次，插件约 1.5 秒自动重连，会话继续。
+- 自建中继全流程：把中继用 `deploy.sh --insecure-http` 部署到一台真实的公网 Linux 服务器（systemd、非 root 运行），开发机上的云端桥以中继模式主动连上去，官方 MCP SDK 客户端经 `http://<服务器IP>:18443/mcp` 列工具、开两个会话、下指令、改文件、`run_command` 拿到 stdout/stderr/退出码、回复。其中一次 `wait_message` 经公网中继实测挂满 50.6 秒才返回 `idle`（**没有被缓冲**，期间下的指令约 0.9 秒就送达）；把中继服务重启一次，插件约 1.5 秒自动重连，会话继续。
 - 在 Chrome 里实际操作网页控制台。
 
 **没有验证**：系统代码页本身就是 936 的中文版 Windows（测试里是把控制台切到 936 来模拟）；双击启动和 `--open` 打开浏览器；Windows 上运行 cloudflared；真实的 Cloud Agent 接入；中国大陆的网络环境。

@@ -90,6 +90,7 @@ export function createController({ vscode, bridgeApi, context, stateDir = nodePa
       });
       running = await bridgeApi.startBridge({
         ...params,
+        cursorApiKey: process.env.CURSOR_API_KEY,
         rememberPublicUrl: (url) => state.save({ publicUrl: url }),
         log: (text) => output.appendLine(text),
       });

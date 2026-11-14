@@ -73,7 +73,7 @@ test("relay e2e: the agent drives the bridge entirely through the relay's /mcp",
   const { client, call } = await agent(t, `${relayUrl}/mcp`);
 
   const tools = (await client.listTools()).tools.map((tool) => tool.name);
-  for (const name of ["connect_session", "wait_message", "report_thinking", "edit_file", "run_command", "command_status"]) {
+  for (const name of ["connect_session", "wait_message", "reply_message", "edit_file", "run_command", "command_status"]) {
     assert.ok(tools.includes(name), `tools should include ${name}`);
   }
 
@@ -91,9 +91,6 @@ test("relay e2e: the agent drives the bridge entirely through the relay's /mcp",
   const task = (await waiting).data;
   assert.equal(task.message, "把 greeting 改成 你好");
 
-  // report_thinking reaches the console timeline.
-  assert.equal((await call("report_thinking", { id: bind.id, text: "开始改文件" })).data.event, "thinking");
-
   // A file edit lands on disk.
   assert.match((await call("edit_file", { path: "src/app.js", old_string: "'hello'", new_string: "'你好'", session: bind.id })).text, /替换 1 处/);
   assert.equal(await fs.readFile(nodePath.join(root, "src/app.js"), "utf8"), "const greeting = '你好';\r\nconsole.log(greeting);\r\n");
@@ -107,7 +104,7 @@ test("relay e2e: the agent drives the bridge entirely through the relay's /mcp",
 
   assert.equal((await call("reply_message", { id: bind.id, text: "改好了" })).data.event, "replied");
   const view = await state(bind.id);
-  assert.deepEqual(view.session.timeline.map(({ role }) => role), ["note", "user", "thinking", "assistant"]);
+  assert.deepEqual(view.session.timeline.map(({ role }) => role), ["note", "user", "assistant"]);
 });
 
 test("relay e2e: two sessions run side by side over one relay link", async (t) => {

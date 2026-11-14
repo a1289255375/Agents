@@ -13,7 +13,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { waitTicket } from "../src/auth.mjs";
 import { startBridge } from "../src/main.mjs";
-import { tempDir, windows, writeTree } from "./helpers.mjs";
+import { fakeCursorApi, sse, tempDir, until, windows, writeTree } from "./helpers.mjs";
 
 const token = "test-token-0123456789-abcdefghijklmnop";
 const nodeCommand = (script) => `node ${script}`;
@@ -63,15 +63,6 @@ function rawRequest(url, { method = "GET", headers = {} } = {}) {
     });
     request.on("error", reject).end();
   });
-}
-
-async function until(check, message) {
-  for (let attempt = 0; attempt < 200; attempt++) {
-    const value = await check();
-    if (value) return value;
-    await sleep(25);
-  }
-  throw new Error(`timed out waiting for: ${message}`);
 }
 
 // A shell poll that began after `since` is in flight. Between two polls the console still shows the
@@ -151,7 +142,7 @@ test("drill: connect, wait, receive a task from the web page, change a file, rep
 
   const tools = (await client.listTools()).tools.map((tool) => tool.name);
   assert.deepEqual(tools, [
-    "connect_session", "wait_message", "reply_message", "report_thinking", "report_progress", "disconnect_session",
+    "connect_session", "wait_message", "reply_message", "report_progress", "disconnect_session",
     "project_info", "list_dir", "find_files", "search_text", "read_file", "write_file", "edit_file", "delete_path", "move_path",
     "run_command", "run_program", "run_tests", "command_status", "stop_command",
   ]);
@@ -440,7 +431,7 @@ test("shell wait: the curl poll delivers the same events with its own narrow tic
   // A loop of short polls: 2 seconds in all, each request answered within the wait budget.
   assert.equal(bind.shellWait.blockMs, 62_000);
   assert.equal(bind.shellWait.command, `end=$(($(date +%s)+2)); n=0; while :; do `
-    + `r=$(curl -sS -m 31 -H 'Authorization: Bearer ${ticket}' '${waitUrl}?loop='$$-$end 2>&1); `
+    + `r=$(curl -sS -m 31 -H 'Authorization: Bearer ${ticket}' '${waitUrl}?loop='$$-$end'&agent='$CURSOR_CONVERSATION_ID 2>&1); `
     + `case $r in '{'?event?:?idle?*) n=0;; '{'?event?:?*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
     + `[ $(date +%s) -ge $end ] && break; done; printf '%s\\n' "$r" | tail -n 1`);
   assert.match(bind.shellWait.instruction, /不要放进后台或 tmux.*不小于 blockMs 毫秒.*或 2 秒到时/);
@@ -537,6 +528,36 @@ test("shell wait: the command given to the agent delivers a message", { skip: wi
   }
 });
 
+test("shell wait: the command names the cloud agent, and its thinking is read from Cursor", { skip: windows && "cloud agents run it on Linux" }, async (t) => {
+  const agentId = "bc-0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+  const api = await fakeCursorApi(t, [
+    (req, res) => {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(sse("thinking", { text: "用户要我" }, "1"));
+      res.write(sse("thinking", { text: "先读 README" }, "2"));
+      res.write(sse("tool_call", { callId: "c1", name: "mcp", status: "running" }, "3"));
+      res.write(sse("thinking", { text: "README 只有一行" }, "4"));
+    },
+  ]);
+  const { web, state, agent: connectAgent } = await setup(t, { shellWaitMs: 20_000, cursorApiKey: "key_e2e", cursorApiBase: api.base });
+  const { call } = await connectAgent();
+  const { id, shellWait } = (await call("connect_session")).data;
+
+  // The agent runs the command exactly as given; its shell environment supplies the agent id.
+  const run = promisify(execFile)("/bin/sh", ["-c", shellWait.command], { env: { ...process.env, CURSOR_CONVERSATION_ID: agentId } });
+  const thinking = await until(async () => {
+    const items = (await state(id)).session.timeline.filter(({ role }) => role === "thinking");
+    return items.length === 2 && items.map(({ text }) => text);
+  }, "thinking in the console");
+  assert.deepEqual(thinking, ["用户要我先读 README", "README 只有一行"]);
+  assert.equal(api.requests.length, 1);
+  assert.equal(api.requests[0].url, `/v1/agents/${agentId}/stream`);
+  assert.equal(api.requests[0].headers.authorization, "Bearer key_e2e");
+
+  await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "继续" } });
+  assert.equal(JSON.parse((await run).stdout).message, "继续");
+});
+
 test("shell wait: the command ends with idle at its deadline, on a newer wait, and after three failures", { skip: windows && "cloud agents run it on Linux" }, async (t) => {
   const { bridge, web, state, agent: connectAgent } = await setup(t, { shellWaitMs: 2000 });
   const { call } = await connectAgent();
@@ -581,7 +602,7 @@ test("shell wait is offered only when the public address is known and can be swi
 
   // A tunnel that keeps the public host name: the address is taken from the request.
   const forwarded = await viaTunnel({ "X-Forwarded-Host": "abc-def.trycloudflare.com", "X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.9" });
-  assert.ok(forwarded.shellWait.command.includes(` 'https://abc-def.trycloudflare.com/wait/${forwarded.id}?loop='$$-$end 2>&1)`));
+  assert.ok(forwarded.shellWait.command.includes(` 'https://abc-def.trycloudflare.com/wait/${forwarded.id}?loop='$$-$end'&agent='`));
   // A tunnel that rewrites the host to localhost: unknown address, so only wait_message is offered.
   assert.equal((await viaTunnel({ "X-Forwarded-For": "203.0.113.9" })).shellWait, undefined);
   // A host name that could break out of the shell command is never used.
@@ -640,7 +661,7 @@ test("the public address is checked against this very process", async (t) => {
   assert.equal(remembered.at(-1), undefined);
 });
 
-test("drill: thinking, run_program and run_tests through the local bridge", async (t) => {
+test("drill: run_program and run_tests through the local bridge", async (t) => {
   const { root, web, state, agent: connectAgent } = await setup(t, { policy: "allow" });
   await writeTree(root, {
     "package.json": JSON.stringify({ scripts: { test: "node say.js tests" } }),
@@ -653,7 +674,6 @@ test("drill: thinking, run_program and run_tests through the local bridge", asyn
 
   await web(`/api/sessions/${session}/messages`, { method: "POST", body: { text: "跑一下" } });
   assert.equal((await call("wait_message", { id: session })).data.event, "message");
-  assert.equal((await call("report_thinking", { id: session, text: "先跑程序再跑测试" })).data.event, "thinking");
 
   const program = await call("run_program", { session, program: process.execPath, args: ["argv.js", "a b", "x&y"] });
   assert.match(program.text, /^\[c1\] 已结束，退出码 0，.*（直接启动，目录 \.）\n\["a b","x&y"\]\n/s);
@@ -667,11 +687,9 @@ test("drill: thinking, run_program and run_tests through the local bridge", asyn
   assert.match(status, /\[c2\] 已结束，退出码 0，/);
   assert.match(status, /said tests/);
 
-  assert.equal((await call("reply_message", { id: session, text: "都跑完了", thinking: "程序和测试都正常" })).data.event, "replied");
+  assert.equal((await call("reply_message", { id: session, text: "都跑完了" })).data.event, "replied");
   const view = await state(session);
-  assert.deepEqual(view.session.timeline.slice(2).map(({ role, text }) => [role, text]), [
-    ["user", "跑一下"], ["thinking", "先跑程序再跑测试"], ["thinking", "程序和测试都正常"], ["assistant", "都跑完了"],
-  ]);
+  assert.deepEqual(view.session.timeline.slice(2).map(({ role, text }) => [role, text]), [["user", "跑一下"], ["assistant", "都跑完了"]]);
   assert.deepEqual(view.activity.map(({ tool, job }) => [tool, job.tool, job.exitCode]), [["run_program", "run_program", 0], ["run_tests", "run_tests", 0]]);
   assert.deepEqual(view.activity[0].job.changes, { added: ["out.txt"], modified: [], deleted: [] });
   assert.deepEqual([view.activity[0].job.stdoutTail, view.activity[0].job.stderrTail], ['["a b","x&y"]\n', "warn\n"]);

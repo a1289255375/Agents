@@ -33,7 +33,8 @@ export const usage = `用法：node cloud/src/main.mjs [项目根目录] [选项
   --help                      显示这段说明
 
 环境变量：
-  CLOUD_BRIDGE_TOKEN          指定访问令牌（至少 24 个字符）；不设置则自动生成并保存在状态目录`;
+  CLOUD_BRIDGE_TOKEN          指定访问令牌（至少 24 个字符）；不设置则自动生成并保存在状态目录
+  CURSOR_API_KEY              你的 Cursor API 密钥。设置后控制台从 Cursor 读取云端 Agent 的思考并显示`;
 
 const port = z.coerce.number().int().min(0).max(65535);
 const optionsSchema = z.object({

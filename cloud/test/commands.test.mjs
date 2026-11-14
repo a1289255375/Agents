@@ -15,7 +15,7 @@ const scripts = {
   "prompt.js": "process.stdout.write('continue? [y/N] '); setTimeout(() => {}, 20000);",
   "big.js": "for (let i = 1; i <= 20000; i++) console.log('line ' + i);",
   "cwd.js": "console.log(process.cwd());",
-  "env.js": "console.log('token=' + (process.env.CLOUD_BRIDGE_TOKEN ?? 'unset'));",
+  "env.js": "console.log('token=' + (process.env.CLOUD_BRIDGE_TOKEN ?? 'unset') + ' key=' + (process.env.CURSOR_API_KEY ?? 'unset'));",
   "sleeper.js": "require('fs').writeFileSync(process.argv[2], String(process.pid)); setTimeout(() => {}, 60000);",
   "tree.js": [
     "const { spawn } = require('child_process');",
@@ -78,12 +78,16 @@ test("a command returns its output and exit code", async (t) => {
   await assert.rejects(runner.report("c99"), /没有编号为 c99 的命令/);
 });
 
-test("output is decoded line by line and the bridge token is not inherited", async (t) => {
+test("output is decoded line by line and the bridge's secrets are not inherited", async (t) => {
   process.env.CLOUD_BRIDGE_TOKEN = "secret-for-test";
-  t.after(() => { delete process.env.CLOUD_BRIDGE_TOKEN; });
+  process.env.CURSOR_API_KEY = "key-for-test";
+  t.after(() => {
+    delete process.env.CLOUD_BRIDGE_TOKEN;
+    delete process.env.CURSOR_API_KEY;
+  });
   const { run } = await setup(t);
   assert.match(await run("node encodings.js"), /\n中文\nutf8 中文\n100%\n$/);
-  assert.match(await run("node env.js"), /\ntoken=unset\n$/);
+  assert.match(await run("node env.js"), /\ntoken=unset key=unset\n$/);
 });
 
 test("a slow command reports progress and can be polled from an offset", async (t) => {

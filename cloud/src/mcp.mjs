@@ -8,7 +8,7 @@ import { describeError } from "./project/files.mjs";
 import { legacyEncodings } from "./project/text.mjs";
 
 const heartbeatMs = 15_000;
-const taskInstruction = "message 是用户交给你的任务。用本服务的项目工具（read_file、edit_file、write_file、search_text、run_command、run_program、run_tests 等）在用户的本地电脑上完成它，调用时带上 session 参数（当前会话 id）。开工前和每个关键步骤用 report_thinking 回传你的思考，耗时较长时用 report_progress 汇报进展。完成后调用 reply_message 发送结果（thinking 参数写这条任务你是怎么想、怎么做的），然后立即执行它返回的 nextCall 继续等待。不要结束当前这一轮。";
+const taskInstruction = "message 是用户交给你的任务。用本服务的项目工具（read_file、edit_file、write_file、search_text、run_command、run_program、run_tests 等）在用户的本地电脑上完成它，调用时带上 session 参数（当前会话 id）。耗时较长时用 report_progress 汇报进展。完成后调用 reply_message 发送结果，然后立即执行它返回的 nextCall 继续等待。不要结束当前这一轮。";
 const redeliveredInstruction = "这条消息之前已经投递过，但一直没有收到 reply_message。如果你已经处理过它，直接调用 reply_message 补发结果，不要重复执行；否则现在处理。";
 const idleInstruction = "暂时没有新消息，这不是错误。立即再次执行 nextCall 继续等待；不要输出说明，不要结束当前这一轮。";
 const shellIdleInstruction = "暂时没有新消息，这不是错误。原样重新执行同一条等待命令继续等待（不行就调用 nextCall）；不要输出说明，不要结束当前这一轮。";
@@ -46,13 +46,15 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
   // Three failed polls in a row end the loop, so an unreachable address sends the agent back to
   // wait_message within seconds instead of leaving it deaf until the deadline. Each run of the
   // command names itself (shell pid and deadline), so the hub can tell its polls from a later run's.
+  // A cloud agent's shell has its agent id in CURSOR_CONVERSATION_ID; the polls pass it on so the
+  // bridge can read the agent's thinking from Cursor (thinking.mjs).
   // The agent copies the command out of a JSON string, so everything before the final printf avoids
   // double quotes and backslashes: the case patterns match the quotes of {"event":"idle" with `?`.
   function shellWait(id, explain) {
     const url = config.shellWaitMs && waitUrl(id);
     // The address comes from request headers or user input and ends up inside a shell command.
     if (!url || !/^[\w.~:/[\]%-]+$/.test(url)) return undefined;
-    const poll = `curl -sS -m ${Math.ceil(config.waitMs / 1000) + 30} -H 'Authorization: Bearer ${waitTicket(config.token, id)}' '${url}?loop='$$-$end 2>&1`;
+    const poll = `curl -sS -m ${Math.ceil(config.waitMs / 1000) + 30} -H 'Authorization: Bearer ${waitTicket(config.token, id)}' '${url}?loop='$$-$end'&agent='$CURSOR_CONVERSATION_ID 2>&1`;
     return {
       command: `end=$(($(date +%s)+${Math.ceil(config.shellWaitMs / 1000)})); n=0; while :; do r=$(${poll}); `
         + `case $r in '{'?event?:?idle?*) n=0;; '{'?event?:?*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
@@ -147,14 +149,13 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
 
   sessionTool(
     "reply_message",
-    "把任务结果或对用户问题的答复发给用户，并附上这条任务的思考过程。随后立刻执行返回的 nextCall 继续等待下一条消息。",
+    "把任务结果或对用户问题的答复发给用户。随后立刻执行返回的 nextCall 继续等待下一条消息。",
     {
       id: idArg,
       text: z.string().trim().min(1).max(100000).describe("发给用户的内容，支持 Markdown"),
-      thinking: z.string().trim().min(1).max(50000).optional().describe("这条任务的思考过程：怎么理解需求、做了哪些判断和取舍、还有什么不确定。用户会在结果上方看到"),
     },
-    ({ id, text, thinking }) => {
-      const result = hub.reply(id, text, thinking);
+    ({ id, text }) => {
+      const result = hub.reply(id, text);
       if (result.event === "disconnected") return waitResult(id, result);
       const viaShell = shellWait(id, false);
       return {
@@ -168,17 +169,6 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
         nextCall: nextWait(id),
         shellWait: viaShell,
       };
-    },
-  );
-
-  sessionTool(
-    "report_thinking",
-    "把你此刻的思考回传给用户：对需求的理解、打算怎么做、为什么这样判断、遇到的疑点。开工前和每个关键步骤调用一次。它不结束任务，也不需要等待回复。",
-    { id: idArg, text: z.string().trim().min(1).max(20000).describe("思考内容") },
-    ({ id, text }) => {
-      const result = hub.think(id, text);
-      if (result.event === "disconnected") return waitResult(id, result);
-      return { event: "thinking", id, sent: true, ...(result.queued && { note: `用户又发来 ${result.queued} 条消息，当前任务回复后会在 wait_message 收到。` }) };
     },
   );
 

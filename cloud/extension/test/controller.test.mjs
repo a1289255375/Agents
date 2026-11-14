@@ -1,6 +1,6 @@
 // Drives the real controller with a fake vscode and the real bridge code, and plays the cloud agent
 // with a real MCP client. It proves the extension's wiring: activate brings up a working bridge, the
-// console API the panel reads shows sessions and their thinking, several sessions run side by side,
+// console API the panel reads shows sessions and their replies, several sessions run side by side,
 // the deploy bundle carries the connection values, and changing the workspace restarts on the new root.
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
@@ -77,7 +77,7 @@ async function connectAgent(t, url, token) {
   return { call };
 }
 
-async function setup(t, folders = []) {
+async function setup(t, folders = [], api = bridgeApi) {
   const root = await tempDir(t);
   await writeTree(root, { "src/app.js": "console.log('hi');\n" });
   const stateDir = await tempDir(t);
@@ -87,7 +87,7 @@ async function setup(t, folders = []) {
     __folders: folders,
     autoStart: true, commandPolicy: "ask", tunnel: "none", publicUrl: "", consolePort: 0, mcpPort: 0,
   });
-  const controller = createController({ vscode, bridgeApi, context, stateDir });
+  const controller = createController({ vscode, bridgeApi: api, context, stateDir });
   t.after(() => controller.stop());
   const web = async (path, init) => {
     const response = await fetch(new URL(path, controller.running.consoleUrl), {
@@ -119,7 +119,7 @@ test("activate falls back to the first workspace folder when no root is set", as
   assert.equal(controller.running.root, await fs.realpath(folder));
 });
 
-test("a cloud agent's thinking and reply reach the console API the panel reads", async (t) => {
+test("a cloud agent's reply and tool activity reach the console API the panel reads", async (t) => {
   const { controller, web } = await setup(t);
   await controller.activate();
   const token = (await web("/api/connection")).data.token;
@@ -127,20 +127,27 @@ test("a cloud agent's thinking and reply reach the console API the panel reads",
 
   const bind = await call("connect_session", { name: "子代理A" });
   assert.equal(bind.event, "bind");
-  await call("report_thinking", { id: bind.id, text: "先看目录结构，再决定怎么改" });
 
   const waiting = call("wait_message", { id: bind.id });
   await sleep(100);
   await web(`/api/sessions/${bind.id}/messages`, { method: "POST", body: JSON.stringify({ text: "读一下 src/app.js" }) });
   assert.equal((await waiting).message, "读一下 src/app.js");
   await call("read_file", { path: "src/app.js", session: bind.id });
-  await call("reply_message", { id: bind.id, text: "读完了", thinking: "文件只有一行" });
+  await call("reply_message", { id: bind.id, text: "读完了" });
 
   const view = (await web(`/api/state?now=1&session=${bind.id}`)).data;
   const roles = view.session.timeline.map((item) => item.role);
-  assert.deepEqual(roles.filter((role) => role !== "note"), ["thinking", "user", "thinking", "assistant"]);
-  assert.match(view.session.timeline.find((item) => item.role === "thinking").text, /先看目录结构/);
+  assert.deepEqual(roles.filter((role) => role !== "note"), ["user", "assistant"]);
   assert.ok(view.activity.some((entry) => entry.tool === "read_file" && entry.session === bind.id));
+});
+
+test("the bridge gets the Cursor API key for reading thinking from the extension host's environment", async (t) => {
+  process.env.CURSOR_API_KEY = "key-from-env";
+  t.after(() => { delete process.env.CURSOR_API_KEY; });
+  const keys = [];
+  const { controller } = await setup(t, [], { ...bridgeApi, startBridge: (params) => { keys.push(params.cursorApiKey); return startBridge(params); } });
+  await controller.activate();
+  assert.deepEqual(keys, ["key-from-env"]);
 });
 
 test("several cloud sessions are visible side by side", async (t) => {

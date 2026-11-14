@@ -171,12 +171,11 @@ export function createHub({ now = Date.now } = {}) {
       });
     },
 
-    reply(id, text, thinking) {
+    reply(id, text) {
       const session = forAgent(id);
       if (!session) return { event: "disconnected" };
       // A retried call must not show the same answer twice.
       const duplicate = session.lastReply?.text === text && session.lastReply.delivered === session.delivered;
-      if (!duplicate && thinking) addToTimeline(session, "thinking", thinking);
       if (!duplicate) addToTimeline(session, "assistant", text);
       session.lastReply = { text, delivered: session.delivered };
       session.acked = session.delivered;
@@ -193,14 +192,24 @@ export function createHub({ now = Date.now } = {}) {
       return { event: "progress", queued: session.inbox.filter((message) => message.seq > session.delivered).length };
     },
 
-    // What the agent says about its own reasoning. The platform does not hand out the raw chain of
-    // thought, so this is the part of it the console can show.
-    think(id, text) {
-      const session = forAgent(id);
-      if (!session) return { event: "disconnected" };
-      addToTimeline(session, "thinking", text);
+    // Thinking read from Cursor arrives in deltas. The deltas of one block grow a single timeline
+    // item, so the console shows the block the way the agent's chat does.
+    think(id, text, block) {
+      const session = sessions.get(id);
+      const last = session.timeline.at(-1);
+      if (last?.role === "thinking" && last.block === block) last.text += text;
+      else addToTimeline(session, "thinking", text, { block });
       changed();
-      return { event: "thinking", queued: session.inbox.filter((message) => message.seq > session.delivered).length };
+    },
+
+    note(id, text) {
+      addToTimeline(sessions.get(id), "note", text);
+      changed();
+    },
+
+    isOpen(id) {
+      const session = sessions.get(id);
+      return Boolean(session && !session.closed);
     },
 
     disconnect(id, by) {

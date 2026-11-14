@@ -53,7 +53,7 @@ function addressOf(req) {
   return { base: `${proto === "http" || proto === "https" ? proto : viaProxy ? "https" : "http"}://${host}`, external: true };
 }
 
-export async function startMcpEndpoint({ bridge, hub, project, port, host }) {
+export async function startMcpEndpoint({ bridge, hub, project, thinking, port, host }) {
   const config = { token: bridge.token, waitMs: bridge.waitMs, shellWaitMs: bridge.shellWaitMs, commandWaitMs: bridge.commandWaitMs };
 
   function unauthorized(res) {
@@ -87,8 +87,11 @@ export async function startMcpEndpoint({ bridge, hub, project, port, host }) {
   // The same wait as wait_message for agents that poll with `curl` in a loop inside their shell tool.
   // Each request stays as short as an MCP wait: tunnels buffer a response until it is complete and
   // lose it when it stays open for many minutes, so one long streaming response does not work.
-  async function handleShellWait(res, id, loop) {
-    const result = await hub.wait(id, { signal: closedSignal(res), holdMs: bridge.waitMs, via: "shell", loop });
+  // `agent` is the Cloud Agent id the command reads from the agent's own shell environment.
+  async function handleShellWait(res, id, loop, agent) {
+    const waiting = hub.wait(id, { signal: closedSignal(res), holdMs: bridge.waitMs, via: "shell", loop });
+    if (agent) thinking?.follow(id, agent);
+    const result = await waiting;
     if (!res.destroyed) json(res, 200, waitResult(id, result, "shell"));
   }
 
@@ -108,7 +111,10 @@ export async function startMcpEndpoint({ bridge, hub, project, port, host }) {
       const wait = /^\/wait\/([0-9a-f]{8})$/.exec(pathname);
       if (wait && req.method === "GET" && bridge.shellWaitMs) {
         if (!hasBearer(req, waitTicket(bridge.token, wait[1]))) unauthorized(res);
-        else await handleShellWait(res, wait[1], /^[\w-]{1,40}$/.exec(searchParams.get("loop") ?? "")?.[0]);
+        else {
+          await handleShellWait(res, wait[1], /^[\w-]{1,40}$/.exec(searchParams.get("loop") ?? "")?.[0],
+            /^bc-[\w-]{1,80}$/.exec(searchParams.get("agent") ?? "")?.[0]);
+        }
         return;
       }
       json(res, 404, { error: "not found" });
