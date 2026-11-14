@@ -332,9 +332,10 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 | `wait_message` | 挂起等待下一条指令，返回 `message`、`idle` 或 `disconnected` |
 | `reply_message` | 把结果发到网页，并返回下一次等待要用的 `nextCall` |
 | `report_progress` | 任务进行中把进展发到网页 |
+| `report_thinking` | 把当前思考回传给用户，网页上单独显示；开工前和关键步骤各调用一次 |
 | `disconnect_session` | 结束这个会话的等待 |
 
-项目工具：`project_info`、`list_dir`、`find_files`、`search_text`、`read_file`、`write_file`、`edit_file`（精确替换）、`delete_path`、`move_path`、`run_command`、`command_status`、`stop_command`。
+项目工具：`project_info`、`list_dir`、`find_files`、`search_text`、`read_file`、`write_file`、`edit_file`（精确替换）、`delete_path`、`move_path`、`run_command`、`run_program`、`run_tests`、`command_status`、`stop_command`。
 
 协议形状沿用仓库里本地方案的 `connect_session` / `wait_message` / `reply_message` / `disconnect_session` 和 `nextCall` 约定。
 
