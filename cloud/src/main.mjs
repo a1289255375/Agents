@@ -15,6 +15,7 @@ import { createHub } from "./hub.mjs";
 import { startConsole, startMcpEndpoint } from "./http.mjs";
 import { createProject, policyLabels } from "./project/index.mjs";
 import { PathError } from "./project/paths.mjs";
+import { startRelayLink } from "./relay-link.mjs";
 import { startCloudflared } from "./tunnel.mjs";
 
 const serverName = "cursor-cloud-bridge";
@@ -23,7 +24,7 @@ const tunnelProbeDelaysMs = [3000, 5000, 10_000, 15_000, 30_000];
 
 export async function startBridge({
   root, token, port, mcpPort, mcpHost = "127.0.0.1", policy, waitMs, shellWaitMs, legacyEncoding, consoleEncoding,
-  publicUrl, tunnel, rememberPublicUrl = async () => {}, log = () => {},
+  publicUrl, tunnel, relayUrl, rememberPublicUrl = async () => {}, log = () => {},
 }) {
   const hub = createHub();
   const project = await createProject({
@@ -31,7 +32,8 @@ export async function startBridge({
   });
   const bridge = {
     instance: randomBytes(8).toString("hex"),
-    token, waitMs, shellWaitMs, commandWaitMs: waitMs, publicUrl, unauthorized: 0,
+    // In relay mode the relay address is the public address the agent uses.
+    token, waitMs, shellWaitMs, commandWaitMs: waitMs, publicUrl: publicUrl ?? relayUrl, unauthorized: 0,
   };
   const mcp = await startMcpEndpoint({ bridge, hub, project, port: mcpPort, host: mcpHost });
   const localMcpUrl = `http://127.0.0.1:${mcp.port}/mcp`;
@@ -44,7 +46,8 @@ export async function startBridge({
       result = { ok: false, message: "还没有填写公网地址" };
     } else {
       try {
-        const response = await fetch(`${url}/`, { signal: AbortSignal.timeout(selfTestTimeoutMs), redirect: "manual" });
+        // The token lets a relay route GET / through to this very bridge instead of answering itself.
+        const response = await fetch(`${url}/`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(selfTestTimeoutMs), redirect: "manual" });
         const data = await response.json().catch(() => undefined);
         if (data?.instance === bridge.instance) {
           result = { ok: true, message: "从本机访问这个地址能到达本服务" };
@@ -92,6 +95,27 @@ export async function startBridge({
         log(`隧道已断开：${reason}`);
       },
     });
+  }
+
+  // Dial the user's public relay and keep the link up. The bridge opens no inbound port; the relay
+  // forwards agent requests down this link. Link state reuses the tunnel field so the console shows it.
+  let stopRelay;
+  function runRelay() {
+    bridge.tunnel = { kind: "relay", state: "starting", url: relayUrl };
+    stopRelay = startRelayLink({
+      relayUrl, token, localHost: "127.0.0.1", localPort: mcp.port,
+      onState({ state, url, detail }) {
+        bridge.tunnel = { kind: "relay", state, url: url ?? relayUrl, ...(detail && { error: detail }) };
+        hub.notify();
+        if (state === "up") {
+          bridge.selfTest = undefined;
+          void selfTest().then((result) => log(`中继链路已连接，自检${result.ok ? "通过" : "未通过"}：${result.message}`));
+        } else if (state === "down") {
+          log(`中继链路断开，正在重连……${detail ? `（${detail}）` : ""}`);
+        }
+      },
+      log,
+    }).stop;
   }
 
   const actions = {
@@ -144,6 +168,7 @@ export async function startBridge({
     throw error;
   }
   if (tunnel === "cloudflared") runTunnel();
+  if (relayUrl) runRelay();
 
   return {
     hub, project, bridge, selfTest,
@@ -152,6 +177,7 @@ export async function startBridge({
     localMcpUrl,
     async stop() {
       stopTunnel?.();
+      stopRelay?.();
       project.commands.shutdown();
       await Promise.all([mcp.server, web.server].map((server) => new Promise((resolve) => {
         server.close(resolve);
@@ -197,13 +223,16 @@ async function cli(argv) {
     console.log(usage);
     return;
   }
+  if (options.relayUrl && (options.tunnel || options.publicUrl)) {
+    throw new ConfigError("--relay 不能和 --tunnel 或 --public-url 同时使用：中继地址本身就是公网地址。");
+  }
   if (options.tunnel && options.publicUrl) {
     throw new ConfigError("--tunnel 和 --public-url 不能同时使用：快速隧道的地址由 cloudflared 分配。");
   }
   const state = await openState(options.stateDir);
   const { token, source } = await resolveToken(state, { renew: options.newToken });
   const root = options.root ?? await askRoot(state.get().lastRoot);
-  const publicUrl = options.publicUrl ?? (options.tunnel ? undefined : state.get().publicUrl);
+  const publicUrl = options.relayUrl ?? options.publicUrl ?? (options.tunnel ? undefined : state.get().publicUrl);
 
   const encodings = options.legacyEncoding
     ? { legacyEncoding: options.legacyEncoding, consoleEncoding: options.legacyEncoding }
@@ -214,6 +243,7 @@ async function cli(argv) {
     bridge = await startBridge({
       root, token, publicUrl, ...encodings,
       port: options.port, mcpPort: options.mcpPort, mcpHost: options.mcpHost, tunnel: options.tunnel,
+      relayUrl: options.relayUrl,
       policy: options.policy, waitMs: options.waitMs, shellWaitMs: options.shellWaitMs,
       rememberPublicUrl: (url) => state.save({ publicUrl: url }),
       log: (text) => console.log(`\n${text}`),
@@ -229,7 +259,7 @@ async function cli(argv) {
     saved: `保存在 ${state.file}`,
     new: `已新生成，保存在 ${state.file}${options.newToken ? "（旧令牌已失效，云端 MCP 配置要换成新的）" : ""}`,
   }[source];
-  const publicNote = publicUrl ? `${publicUrl}/mcp`
+  const publicNote = publicUrl ? `${publicUrl}/mcp${options.relayUrl ? "（经公网中继，插件正连接服务器）" : ""}`
     : options.tunnel ? "正在启动 cloudflared 隧道……"
       : "未设置。启动隧道后，在网页的“连接配置”里填写，或下次启动加 --public-url";
   console.log([
@@ -250,7 +280,8 @@ async function cli(argv) {
   if (options.mcpHost !== "127.0.0.1") {
     console.log(`\n注意：MCP 端点监听在 ${options.mcpHost}，同一网络里的其他设备也能访问它（仍然需要令牌）。`);
   }
-  if (publicUrl) {
+  // In relay mode the self-test runs once the outbound link is up (see runRelay), not here.
+  if (publicUrl && !options.relayUrl) {
     void bridge.selfTest().then((result) => console.log(`\n公网地址自检${result.ok ? "通过" : "未通过"}：${result.message}`));
   }
   if (options.open) openBrowser(bridge.consoleUrl);

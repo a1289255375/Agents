@@ -6,7 +6,7 @@ import nodePath from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  cleanRoot, ConfigError, detectEncodings, normalizePublicUrl, openState, parseOptions, resolveToken,
+  cleanRoot, ConfigError, detectEncodings, normalizePublicUrl, normalizeRelayUrl, openState, parseOptions, resolveToken,
 } from "../src/config.mjs";
 import { legacyEncodings } from "../src/project/text.mjs";
 import { tempDir, windows } from "./helpers.mjs";
@@ -22,6 +22,7 @@ test("options: defaults", () => {
     mcpHost: "127.0.0.1",
     publicUrl: undefined,
     tunnel: undefined,
+    relayUrl: undefined,
     policy: "ask",
     waitMs: 50_000,
     shellWaitMs: 1_200_000,
@@ -48,6 +49,7 @@ test("options: every option is read", () => {
     mcpHost: "0.0.0.0",
     publicUrl: "https://bridge.example.com",
     tunnel: undefined,
+    relayUrl: undefined,
     policy: "deny",
     waitMs: 25_000,
     shellWaitMs: 0,
@@ -57,6 +59,8 @@ test("options: every option is read", () => {
     open: true,
   });
   assert.equal(parseOptions(["--tunnel", "cloudflared"]).tunnel, "cloudflared");
+  assert.equal(parseOptions(["--relay", "36.138.159.226"]).relayUrl, "https://36.138.159.226");
+  assert.equal(parseOptions(["--relay", "https://relay.example.com:8443/mcp"]).relayUrl, "https://relay.example.com:8443");
 });
 
 test("options: the project root survives Windows quoting accidents", () => {
@@ -97,6 +101,13 @@ test("public address: accepts what people paste", () => {
   for (const bad of ["", "abc", "ftp://example.com", "example.com:3221", "javascript:alert(1)"]) {
     assert.throws(() => normalizePublicUrl(bad), ConfigError, bad);
   }
+});
+
+test("relay address: a bare host is assumed https so only the server address is needed", () => {
+  assert.equal(normalizeRelayUrl("36.138.159.226"), "https://36.138.159.226");
+  assert.equal(normalizeRelayUrl("  relay.example.com \n"), "https://relay.example.com");
+  assert.equal(normalizeRelayUrl("https://relay.example.com:8443/mcp/"), "https://relay.example.com:8443");
+  assert.equal(normalizeRelayUrl("http://203.0.113.5:8080"), "http://203.0.113.5:8080");
 });
 
 test("state: the token is generated once and kept outside the repository", async (t) => {
@@ -194,6 +205,10 @@ test("command line: help, and no project root without a terminal", async (t) => 
   const both = runCli(t, [stateDir, "--state-dir", stateDir, "--tunnel", "cloudflared", "--public-url", "https://x.example.com"]);
   assert.equal(await both.exited, 1);
   assert.match(both.output.err, /--tunnel 和 --public-url 不能同时使用/);
+
+  const relayClash = runCli(t, [stateDir, "--state-dir", stateDir, "--relay", "1.2.3.4", "--public-url", "https://x.example.com"]);
+  assert.equal(await relayClash.exited, 1);
+  assert.match(relayClash.output.err, /--relay 不能和 --tunnel 或 --public-url 同时使用/);
 });
 
 test("command line: starts, keeps the token out of the terminal and remembers its state", async (t) => {

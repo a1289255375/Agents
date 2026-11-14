@@ -22,6 +22,7 @@ export const usage = `用法：node cloud/src/main.mjs [项目根目录] [选项
   --mcp-host <地址>           MCP 端点监听地址（默认 127.0.0.1；隧道客户端不在本机时才需要改）
   --public-url <地址>         隧道的公网地址，例如 https://bridge.example.com（会记住，下次不用再写）
   --tunnel cloudflared        启动时顺带运行 cloudflared 快速隧道（需要已安装 cloudflared）
+  --relay <服务器地址>        主动连到自己公网服务器上的中继，例如 https://1.2.3.4（只填一项，公网地址即服务器地址）
   --command-policy <策略>     命令执行策略：ask 每条命令在网页上确认（默认）、allow 全部允许、deny 禁止
   --wait-seconds <秒>         一次等待请求最长挂起多久（默认 50；隧道或云端会更早切断时调小）
   --shell-wait-seconds <秒>   一条 Shell 等待命令最长挂起多久，0 表示不提供 Shell 等待（默认 1200）
@@ -42,6 +43,7 @@ const optionsSchema = z.object({
   "mcp-host": z.string().min(1).default("127.0.0.1"),
   "public-url": z.string().optional(),
   tunnel: z.enum(["cloudflared"]).optional(),
+  relay: z.string().optional(),
   "command-policy": z.enum(["ask", "allow", "deny"]).default("ask"),
   "wait-seconds": z.coerce.number().int().min(5).max(3600).default(50),
   "shell-wait-seconds": z.coerce.number().int().min(0).max(86_400).default(1200),
@@ -71,6 +73,13 @@ export function normalizePublicUrl(input) {
     throw new ConfigError(`公网地址应是 https:// 开头的完整网址，收到的是：${input}`);
   }
   return url.origin + url.pathname.replace(/\/+$/, "").replace(/\/mcp$/, "");
+}
+
+// The relay address is the public address too, so it is accepted the same way as a public URL, but a
+// bare host like "1.2.3.4" is assumed to be https so the user only has to type the server address.
+export function normalizeRelayUrl(input) {
+  const trimmed = input.trim();
+  return normalizePublicUrl(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
 }
 
 export function parseOptions(argv, platform = process.platform) {
@@ -107,6 +116,7 @@ export function parseOptions(argv, platform = process.platform) {
     mcpHost: options["mcp-host"],
     publicUrl: options["public-url"] && normalizePublicUrl(options["public-url"]),
     tunnel: options.tunnel,
+    relayUrl: options.relay && normalizeRelayUrl(options.relay),
     policy: options["command-policy"],
     waitMs: options["wait-seconds"] * 1000,
     shellWaitMs: options["shell-wait-seconds"] * 1000,
