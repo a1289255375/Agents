@@ -5,8 +5,6 @@ import nodePath from "node:path";
 
 const plainArgument = /^[\w@%+=:,./\\-]+$/;
 const cmdMetaChars = /([()\][%!^"`<>&|;, *?])/g;
-// Shims that npm puts in node_modules/.bin pass their arguments through cmd.exe a second time.
-const cmdShim = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i;
 
 // How the launch is shown to the user for approval and in the activity feed.
 export const displayArgv = (argv) => argv.map((arg) => (plainArgument.test(arg) ? arg : `"${arg.replaceAll('"', '\\"')}"`)).join(" ");
@@ -28,17 +26,20 @@ export function resolveWindowsProgram(program, cwd, env = process.env, exists = 
   return undefined;
 }
 
-// Quoting for `cmd.exe /d /s /c "<line>"`, the only way to run a batch file. Same rules as the
-// cross-spawn package: backslashes before a quote are doubled, then every cmd metacharacter gets a caret.
-function cmdArgument(arg, twice) {
-  let quoted = `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1")}"`;
-  quoted = quoted.replace(cmdMetaChars, "^$1");
-  return twice ? quoted.replace(cmdMetaChars, "^$1") : quoted;
+// Quoting for `cmd.exe /d /s /c "<line>"`, the only way to run a batch file. Backslashes before a quote
+// are doubled, then every cmd metacharacter gets a caret — twice. A batch file hands %* (or %1…) to the
+// real program through a second cmd.exe parse, so one caret is spent reaching the batch file and the
+// other has to survive to protect the metacharacter when the body runs; one caret leaves a bare | or &
+// for that second parse (`| was unexpected at this time`). cross-spawn only double-escapes node_modules/
+// .bin shims, but any forwarding .cmd/.bat needs it, so every argument is escaped twice here.
+function cmdArgument(arg) {
+  const quoted = `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\*)$/, "$1$1")}"`;
+  return quoted.replace(cmdMetaChars, "^$1").replace(cmdMetaChars, "^$1");
 }
 
+// The batch file is the command of that first parse only, so its own path is caret-escaped just once.
 export function cmdLine(file, args) {
-  const twice = cmdShim.test(file);
-  return [file.replace(cmdMetaChars, "^$1"), ...args.map((arg) => cmdArgument(arg, twice))].join(" ");
+  return [file.replace(cmdMetaChars, "^$1"), ...args.map(cmdArgument)].join(" ");
 }
 
 // [file, args, spawn options] for an argument list. Throws when the program cannot be found on Windows;

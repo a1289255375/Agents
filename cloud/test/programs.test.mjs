@@ -44,18 +44,19 @@ test("Windows program lookup follows PATHEXT, working directory first", () => {
   assert.equal(find("scripts/missing"), undefined);
 });
 
-test("a batch file is started through cmd.exe with every metacharacter escaped", () => {
+test("a batch file is started through cmd.exe with every metacharacter escaped twice", () => {
+  // Every .cmd/.bat argument is caret-escaped twice: the file forwards %* through a second cmd.exe parse.
   assert.equal(
     cmdLine("C:\\Program Files\\nodejs\\npm.cmd", ["run", "a b", 'say "hi"', "a&b", "100%", "tail\\"]),
-    'C:\\Program^ Files\\nodejs\\npm.cmd ^"run^" ^"a^ b^" ^"say^ \\^"hi\\^"^" ^"a^&b^" ^"100^%^" ^"tail\\\\^"',
+    'C:\\Program^ Files\\nodejs\\npm.cmd ^^^"run^^^" ^^^"a^^^ b^^^" ^^^"say^^^ \\^^^"hi\\^^^"^^^" ^^^"a^^^&b^^^" ^^^"100^^^%^^^" ^^^"tail\\\\^^^"',
   );
-  // Shims in node_modules/.bin hand their arguments to cmd.exe once more.
+  // A node_modules/.bin shim is escaped the same way as any other forwarding batch file.
   assert.equal(cmdLine("C:\\p\\node_modules\\.bin\\eslint.cmd", ["a&b"]), 'C:\\p\\node_modules\\.bin\\eslint.cmd ^^^"a^^^&b^^^"');
 
   const exists = (file) => ["c:\\bin\\npm.cmd", "c:\\bin\\node.exe"].includes(file.toLowerCase());
   const options = { platform: "win32", cwd: "C:\\proj", env: { PATH: "C:\\bin", ComSpec: "C:\\Windows\\cmd.exe" }, exists };
   assert.deepEqual(programLaunch(["npm", "test"], options), [
-    "C:\\Windows\\cmd.exe", ["/d", "/s", "/c", '"C:\\bin\\npm.CMD ^"test^""'], { windowsVerbatimArguments: true },
+    "C:\\Windows\\cmd.exe", ["/d", "/s", "/c", '"C:\\bin\\npm.CMD ^^^"test^^^""'], { windowsVerbatimArguments: true },
   ]);
   assert.deepEqual(programLaunch(["node", "a b.js"], options), ["C:\\bin\\node.EXE", ["a b.js"], {}]);
   assert.throws(() => programLaunch(["nope"], options), /找不到程序 nope/);
