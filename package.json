@@ -8,7 +8,10 @@
   "scripts": {
     "start": "node src/index.mjs",
     "web": "node src/index.mjs --web",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "cloud": "node cloud/src/main.mjs",
+    "cloud:vsix": "node cloud/extension/build.mjs",
+    "test": "node --test \"cloud/test/*.test.mjs\" \"cloud/extension/test/*.test.mjs\""
   },
   "engines": {
     "node": ">=22"

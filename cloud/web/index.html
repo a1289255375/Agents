@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cursor 云端桥</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" type="module"></script>
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span class="brand-icon" aria-hidden="true">›_</span> Cursor 云端桥</div>
+    <button type="button" id="open-connection" class="open-connection">连接配置</button>
+    <div class="sidebar-heading"><span>云端会话 <span id="count">0</span></span></div>
+    <nav id="sessions" aria-label="云端会话"></nav>
+    <div class="bridge-info">
+      <div class="bridge-row"><span>项目</span><code id="root"></code></div>
+      <div class="bridge-row"><span>公网</span><span id="public-status" class="status" role="status">读取中</span></div>
+      <label class="bridge-row" for="policy"><span>命令</span>
+        <select id="policy">
+          <option value="ask">每条都要我确认</option>
+          <option value="allow">全部允许</option>
+          <option value="deny">禁止执行</option>
+        </select>
+      </label>
+    </div>
+  </aside>
+  <main>
+    <header class="chat-header">
+      <div><h1 id="title" class="session-heading"><span class="session-name">云端会话</span><time class="session-created" hidden></time></h1><p id="subtitle" hidden></p></div>
+      <div class="chat-actions">
+        <span id="status" class="status" role="status">正在连接</span>
+        <button type="button" id="disconnect" class="header-button" hidden>断开</button>
+        <button type="button" id="delete" class="header-button danger" hidden>删除会话</button>
+      </div>
+    </header>
+    <p id="session-hint" class="session-hint" role="status" hidden></p>
+    <section id="approvals" class="approvals" aria-label="待确认和运行中的命令" hidden></section>
+    <div id="chat" class="chat" tabindex="0" aria-label="对话与操作记录">
+      <div id="empty" class="empty">
+        <h2>等待云端 Agent 接入</h2>
+        <ol>
+          <li>用隧道把本机的 MCP 端点 <code id="empty-endpoint"></code> 暴露到公网，把公网地址填进“连接配置”。</li>
+          <li>在 <code>cursor.com/agents</code> 的 MCP 设置里添加“连接配置”中的服务。</li>
+          <li>启动一个 Cloud Agent，把“连接配置”里的提示词发给它。</li>
+        </ol>
+        <p>会话出现在左侧后，就可以在这里给它下指令。</p>
+        <button type="button" id="empty-connection" class="open-connection">打开连接配置</button>
+      </div>
+      <div id="messages" class="messages" hidden></div>
+    </div>
+    <div class="composer-area" id="composer-area" hidden>
+      <p id="notice" role="alert" hidden></p>
+      <form id="form" class="composer">
+        <label for="input" class="sr-only">指令</label>
+        <textarea id="input" rows="2" maxlength="100000" placeholder="给云端 Agent 下指令（Ctrl+Enter 发送）" required></textarea>
+        <div class="composer-actions">
+          <button id="send" type="submit" aria-label="发送指令" title="发送指令"><span aria-hidden="true">↑</span></button>
+        </div>
+      </form>
+    </div>
+  </main>
+  <dialog id="connection-dialog" aria-labelledby="connection-title">
+    <div class="dialog-heading">
+      <h2 id="connection-title">连接配置</h2>
+      <form method="dialog"><button type="submit" aria-label="关闭">关闭</button></form>
+    </div>
+    <section>
+      <h3>1. 公网地址</h3>
+      <p class="dialog-note">隧道给本机 MCP 端点 <code id="local-endpoint"></code> 分配的地址。只把这个端口交给隧道，不要暴露本页面所在的端口。</p>
+      <form id="public-form" class="inline-form">
+        <label for="public-url" class="sr-only">公网地址</label>
+        <input id="public-url" type="url" placeholder="https://你的隧道地址" maxlength="500" autocomplete="off" spellcheck="false">
+        <button type="submit" id="public-save">保存并自检</button>
+      </form>
+      <p id="public-error" class="dialog-result" data-state="error" role="alert" hidden></p>
+      <p id="public-result" class="dialog-result" role="status" hidden></p>
+      <p id="tunnel-state" class="dialog-note" hidden></p>
+      <p id="observed" class="dialog-note" hidden></p>
+      <p id="unauthorized" class="dialog-result" data-state="error" hidden></p>
+    </section>
+    <section>
+      <h3>2. 在 cursor.com/agents 添加 MCP 服务</h3>
+      <p class="dialog-note">类型选 HTTP。访问令牌等同于这台电脑的钥匙，只填进 Cursor 的 MCP 配置，不要提交到仓库或发给别人。</p>
+      <dl class="fields">
+        <dt>名称</dt><dd><code id="server-name"></code><button type="button" data-copy="serverName">复制</button></dd>
+        <dt>URL</dt><dd><code id="server-url"></code><button type="button" data-copy="url">复制</button></dd>
+        <dt>请求头名称</dt><dd><code id="server-header-name"></code><button type="button" data-copy="headerName">复制</button></dd>
+        <dt>请求头的值</dt><dd><code id="server-header-value"></code><button type="button" data-copy="headerValue">复制</button></dd>
+      </dl>
+      <div class="copy-block">
+        <div class="copy-heading"><span>JSON 配置（需要粘贴 JSON 时用）</span>
+          <span><label><input type="checkbox" id="show-token"> 显示令牌</label> <button type="button" data-copy="config">复制</button></span></div>
+        <pre id="server-config" class="tool-output"></pre>
+      </div>
+    </section>
+    <section>
+      <h3>3. 发给 Cloud Agent 的提示词</h3>
+      <div class="copy-block">
+        <div class="copy-heading"><span>启动 Cloud Agent 后，把它作为第一条消息发出</span><button type="button" data-copy="prompt">复制</button></div>
+        <pre id="prompt" class="tool-output prompt"></pre>
+      </div>
+    </section>
+    <p id="connection-error" class="dialog-result" data-state="error" role="alert" hidden></p>
+  </dialog>
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-text">
+    <h2 id="confirm-title"></h2>
+    <p id="confirm-text"></p>
+    <form method="dialog" class="confirm-actions">
+      <button type="submit" value="cancel" autofocus>取消</button>
+      <button type="submit" value="ok" id="confirm-ok">确认</button>
+    </form>
+  </dialog>
+</body>
+</html>

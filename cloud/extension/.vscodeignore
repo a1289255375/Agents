@@ -1,0 +1,7 @@
+build.mjs
+test/**
+.gitignore
+.vscodeignore
+*.vsix
+**/.DS_Store
+node_modules/.package-lock.json

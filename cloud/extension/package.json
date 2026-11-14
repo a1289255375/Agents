@@ -1,0 +1,98 @@
+{
+  "name": "cursor-cloud-bridge",
+  "displayName": "Cursor 云端桥",
+  "description": "在 IDE 里运行云端桥：让 Cursor Cloud Agent 通过 MCP 读写本机项目、执行命令，并在面板里给它下指令、看思考过程。",
+  "version": "0.1.0",
+  "publisher": "a1289255375",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/a1289255375/Agents.git"
+  },
+  "engines": {
+    "vscode": "^1.84.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      { "command": "cursorCloudBridge.openConsole", "title": "打开控制台", "category": "Cursor 云端桥" },
+      { "command": "cursorCloudBridge.openConsoleInBrowser", "title": "在浏览器中打开控制台", "category": "Cursor 云端桥" },
+      { "command": "cursorCloudBridge.prepareCloud", "title": "准备云端接入（一键）", "category": "Cursor 云端桥" },
+      { "command": "cursorCloudBridge.setWorkspaceRoot", "title": "设置工作区目录", "category": "Cursor 云端桥" },
+      { "command": "cursorCloudBridge.setCommandPolicy", "title": "切换命令执行策略", "category": "Cursor 云端桥" },
+      { "command": "cursorCloudBridge.restart", "title": "重启云端桥", "category": "Cursor 云端桥" },
+      { "command": "cursorCloudBridge.stop", "title": "停止云端桥", "category": "Cursor 云端桥" },
+      { "command": "cursorCloudBridge.regenerateToken", "title": "重新生成访问令牌", "category": "Cursor 云端桥" }
+    ],
+    "configuration": {
+      "title": "Cursor 云端桥",
+      "properties": {
+        "cursorCloudBridge.workspaceRoot": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "交给 Cloud Agent 操作的项目根目录。留空则用当前工作区的第一个文件夹。Cloud Agent 的文件操作被限制在这个目录内。"
+        },
+        "cursorCloudBridge.commandPolicy": {
+          "type": "string",
+          "enum": ["ask", "allow", "deny"],
+          "enumDescriptions": ["每条命令都要在控制台确认", "全部允许", "禁止执行命令"],
+          "default": "ask",
+          "description": "命令执行策略。运行中也可在控制台左下角或用命令随时切换。"
+        },
+        "cursorCloudBridge.consolePort": {
+          "type": "number",
+          "default": 3220,
+          "description": "网页控制台端口，只监听 127.0.0.1。"
+        },
+        "cursorCloudBridge.mcpPort": {
+          "type": "number",
+          "default": 3221,
+          "description": "MCP 端点端口，交给隧道的只有它。"
+        },
+        "cursorCloudBridge.publicUrl": {
+          "type": "string",
+          "default": "",
+          "description": "隧道的公网地址，例如 https://bridge.example.com。tunnel 设为 cloudflared 或填了 relayUrl 时忽略此项。"
+        },
+        "cursorCloudBridge.relayUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "你自己公网服务器上中继的地址。**填了这一项就自动用中继模式**：插件主动连到服务器，家里不用开入站端口，云端 MCP 配置的 URL 就是这个地址加 `/mcp`。明文中继必须带协议和端口，例如 `http://1.2.3.4:18443`；只填 `1.2.3.4` 会按 https。不要把中继地址只填在“连接配置”的公网地址栏——那里不会建立出站链路。留空则按 tunnel/publicUrl。"
+        },
+        "cursorCloudBridge.tunnel": {
+          "type": "string",
+          "enum": ["none", "cloudflared", "relay"],
+          "default": "none",
+          "description": "none 表示自己开隧道并填 publicUrl；cloudflared 表示启动时顺带运行 cloudflared 快速隧道（需已安装 cloudflared）；relay 表示连到 relayUrl 指定的公网中继（只填 relayUrl 也会自动进入中继模式）。"
+        },
+        "cursorCloudBridge.waitSeconds": {
+          "type": "number",
+          "default": 50,
+          "description": "一次等待请求最长挂起多久（秒）。隧道或云端会更早切断时调小。"
+        },
+        "cursorCloudBridge.shellWaitSeconds": {
+          "type": "number",
+          "default": 1200,
+          "description": "一条 Shell 等待命令最长挂起多久（秒），0 表示不提供 Shell 等待。"
+        },
+        "cursorCloudBridge.autoStart": {
+          "type": "boolean",
+          "default": true,
+          "description": "IDE 启动后自动运行云端桥（需已设置工作区）。"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  }
+}
