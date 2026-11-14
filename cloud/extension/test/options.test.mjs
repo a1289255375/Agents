@@ -14,7 +14,7 @@ test("bridgeParams maps settings to startBridge arguments", () => {
   const params = bridgeParams({
     root: " /home/me/proj ",
     token: "a-token-value",
-    settings: { commandPolicy: "allow", consolePort: 4000, mcpPort: 4001, waitSeconds: 30, shellWaitSeconds: 600, publicUrl: "https://x.example/mcp/" },
+    settings: { commandPolicy: "allow", consolePort: 4000, mcpPort: 4001, waitSeconds: 30, publicUrl: "https://x.example/mcp/" },
     encodings: { legacyEncoding: "gbk", consoleEncoding: "cp866" },
   });
   assert.deepEqual(params, {
@@ -24,7 +24,6 @@ test("bridgeParams maps settings to startBridge arguments", () => {
     mcpPort: 4001,
     policy: "allow",
     waitMs: 30_000,
-    shellWaitMs: 600_000,
     legacyEncoding: "gbk",
     consoleEncoding: "cp866",
     publicUrl: "https://x.example/mcp/",
@@ -39,7 +38,6 @@ test("bridgeParams uses defaults and drops publicUrl when a tunnel runs", () => 
   assert.equal(params.mcpPort, 3221);
   assert.equal(params.policy, "ask");
   assert.equal(params.waitMs, 50_000);
-  assert.equal(params.shellWaitMs, 1_200_000);
   assert.equal(params.legacyEncoding, "gbk");
   assert.equal(params.consoleEncoding, "gbk");
   assert.equal(params.tunnel, "cloudflared");

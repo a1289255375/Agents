@@ -15,7 +15,7 @@ const scripts = {
   "prompt.js": "process.stdout.write('continue? [y/N] '); setTimeout(() => {}, 20000);",
   "big.js": "for (let i = 1; i <= 20000; i++) console.log('line ' + i);",
   "cwd.js": "console.log(process.cwd());",
-  "env.js": "console.log('token=' + (process.env.CLOUD_BRIDGE_TOKEN ?? 'unset'));",
+  "env.js": "console.log('token=' + (process.env.CLOUD_BRIDGE_TOKEN ?? 'unset') + ' key=' + (process.env.CURSOR_API_KEY ?? 'unset'));",
   "sleeper.js": "require('fs').writeFileSync(process.argv[2], String(process.pid)); setTimeout(() => {}, 60000);",
   "tree.js": [
     "const { spawn } = require('child_process');",
@@ -78,12 +78,16 @@ test("a command returns its output and exit code", async (t) => {
   await assert.rejects(runner.report("c99"), /没有编号为 c99 的命令/);
 });
 
-test("output is decoded line by line and the bridge token is not inherited", async (t) => {
+test("output is decoded line by line and the bridge's secrets are not inherited", async (t) => {
   process.env.CLOUD_BRIDGE_TOKEN = "secret-for-test";
-  t.after(() => { delete process.env.CLOUD_BRIDGE_TOKEN; });
+  process.env.CURSOR_API_KEY = "key-for-test";
+  t.after(() => {
+    delete process.env.CLOUD_BRIDGE_TOKEN;
+    delete process.env.CURSOR_API_KEY;
+  });
   const { run } = await setup(t);
   assert.match(await run("node encodings.js"), /\n中文\nutf8 中文\n100%\n$/);
-  assert.match(await run("node env.js"), /\ntoken=unset\n$/);
+  assert.match(await run("node env.js"), /\ntoken=unset key=unset\n$/);
 });
 
 test("a slow command reports progress and can be polled from an offset", async (t) => {
@@ -91,13 +95,13 @@ test("a slow command reports progress and can be polled from an offset", async (
   const id = await runner.request({ command: "node ticks.js 12" });
   const first = await runner.report(id);
   assert.match(first, /^\[c1\] 仍在运行，已 [\d.]+ 秒/);
-  const offset = Number(/command_status\(\{"jobId":"c1","offset":(\d+)\}\)/.exec(first)[1]);
+  const offset = Number(/后续输出从 offset (\d+) 开始/.exec(first)[1]);
   let rest = "";
   for (let next = offset, state = "running"; state === "running";) {
     const report = await runner.report(id, { offset: next });
     state = report.startsWith("[c1] 仍在运行") ? "running" : "done";
     rest += report.split("\n").slice(1).join("\n");
-    next = Number(/"offset":(\d+)/.exec(report)?.[1] ?? next);
+    next = Number(/offset (\d+)/.exec(report)?.[1] ?? next);
   }
   const seen = `${first}\n${rest}`.match(/tick \d+/g);
   assert.deepEqual(seen, Array.from({ length: 12 }, (_, index) => `tick ${index + 1}`));
@@ -123,7 +127,7 @@ test("long output keeps its head and tail", async (t) => {
   assert.ok(report.length < 31_000);
   assert.match(report, /\nline 1\nline 2\n/);
   assert.match(report, /\nline 20000\n$/);
-  const omitted = /此处省略 (\d+) 个字符，可用 command_status\(\{"jobId":"c1","offset":(\d+)\}\) 读取/.exec(report);
+  const omitted = /此处省略 (\d+) 个字符，从 offset (\d+) 开始/.exec(report);
   assert.ok(Number(omitted[1]) > 100_000);
   assert.match(await runner.report("c1", { offset: Number(omitted[2]) }), /^\[c1\] 已结束.*\n.*line \d+\n/s);
 });
@@ -158,7 +162,7 @@ test("stop_command and shutdown kill the whole process tree", async (t) => {
 test("policy ask: a command waits for the user's decision", async (t) => {
   const { runner, changes } = await setup(t, { policy: "ask", waitMs: 300 });
   const id = await runner.request({ command: "node echo.js asked", session: "s1" });
-  assert.match(await runner.report(id), /^\[c1\] 等待用户在网页控制台确认这条命令.*command_status\(\{"jobId":"c1"\}\)/);
+  assert.equal(await runner.report(id), "[c1] 等待用户在网页控制台确认这条命令（命令策略：每次确认）。");
   assert.deepEqual(runner.list().map(({ id, state, session }) => ({ id, state, session })), [{ id: "c1", state: "awaiting_approval", session: "s1" }]);
   assert.equal(changes.some((job) => job.state === "running"), false);
 

@@ -25,7 +25,6 @@ test("options: defaults", () => {
     relayUrl: undefined,
     policy: "ask",
     waitMs: 50_000,
-    shellWaitMs: 1_200_000,
     legacyEncoding: undefined,
     stateDir: nodePath.join(os.homedir(), ".cursor-cloud-bridge"),
     newToken: false,
@@ -39,7 +38,7 @@ test("options: every option is read", () => {
   const options = parseOptions([
     "--root", "/srv/app", "--port", "4000", "--mcp-port", "0", "--mcp-host", "0.0.0.0",
     "--public-url", "https://bridge.example.com/mcp/", "--command-policy", "deny", "--wait-seconds", "25",
-    "--shell-wait-seconds", "0", "--legacy-encoding", "big5", "--state-dir", "/tmp/state", "--new-token", "--open",
+    "--legacy-encoding", "big5", "--state-dir", "/tmp/state", "--new-token", "--open",
   ]);
   assert.deepEqual(options, {
     help: false,
@@ -52,7 +51,6 @@ test("options: every option is read", () => {
     relayUrl: undefined,
     policy: "deny",
     waitMs: 25_000,
-    shellWaitMs: 0,
     legacyEncoding: "big5",
     stateDir: "/tmp/state",
     newToken: true,

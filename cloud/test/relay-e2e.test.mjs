@@ -40,7 +40,7 @@ async function setup(t, overrides = {}) {
   const relayUrl = `http://127.0.0.1:${relayPort}`;
 
   const bridge = await startBridge({
-    root, token, port: 0, mcpPort: 0, policy: "allow", waitMs: 1500, shellWaitMs: 0,
+    root, token, port: 0, mcpPort: 0, policy: "allow", waitMs: 1500,
     legacyEncoding: "gbk", consoleEncoding: "gbk", relayUrl, ...overrides,
   });
   t.after(() => bridge.stop());
@@ -73,16 +73,16 @@ test("relay e2e: the agent drives the bridge entirely through the relay's /mcp",
   const { client, call } = await agent(t, `${relayUrl}/mcp`);
 
   const tools = (await client.listTools()).tools.map((tool) => tool.name);
-  for (const name of ["connect_session", "wait_message", "report_thinking", "edit_file", "run_command", "command_status"]) {
+  for (const name of ["connect_session", "wait_message", "reply_message", "edit_file", "run_command", "command_status"]) {
     assert.ok(tools.includes(name), `tools should include ${name}`);
   }
 
   const bind = (await call("connect_session", { name: "中继演练" })).data;
   assert.equal(bind.event, "bind");
 
-  // Nothing queued yet: the held wait times out as idle and tells the agent to wait again.
+  // Nothing queued yet: the held wait times out as idle.
   const idle = (await call("wait_message", { id: bind.id })).data;
-  assert.equal(idle.event, "idle");
+  assert.deepEqual(idle, { event: "idle", id: bind.id });
 
   // A wait held open while the user types in the console; the held response carries the message back.
   const waiting = call("wait_message", { id: bind.id });
@@ -90,9 +90,6 @@ test("relay e2e: the agent drives the bridge entirely through the relay's /mcp",
   await web(`/api/sessions/${bind.id}/messages`, { method: "POST", body: { text: "把 greeting 改成 你好" } });
   const task = (await waiting).data;
   assert.equal(task.message, "把 greeting 改成 你好");
-
-  // report_thinking reaches the console timeline.
-  assert.equal((await call("report_thinking", { id: bind.id, text: "开始改文件" })).data.event, "thinking");
 
   // A file edit lands on disk.
   assert.match((await call("edit_file", { path: "src/app.js", old_string: "'hello'", new_string: "'你好'", session: bind.id })).text, /替换 1 处/);
@@ -107,7 +104,7 @@ test("relay e2e: the agent drives the bridge entirely through the relay's /mcp",
 
   assert.equal((await call("reply_message", { id: bind.id, text: "改好了" })).data.event, "replied");
   const view = await state(bind.id);
-  assert.deepEqual(view.session.timeline.map(({ role }) => role), ["note", "user", "thinking", "assistant"]);
+  assert.deepEqual(view.session.timeline.map(({ role }) => role), ["note", "user", "assistant"]);
 });
 
 test("relay e2e: two sessions run side by side over one relay link", async (t) => {
@@ -155,7 +152,7 @@ test("relay e2e: pasting the relay as a public URL alone explains that relayUrl 
   const relayUrl = `http://127.0.0.1:${relayPort}`;
 
   const bridge = await startBridge({
-    root, token, port: 0, mcpPort: 0, policy: "allow", waitMs: 1500, shellWaitMs: 0,
+    root, token, port: 0, mcpPort: 0, policy: "allow", waitMs: 1500,
     legacyEncoding: "gbk", consoleEncoding: "gbk", publicUrl: relayUrl,
   });
   t.after(() => bridge.stop());

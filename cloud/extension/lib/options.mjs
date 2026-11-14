@@ -51,7 +51,6 @@ export function bridgeParams({ root, token, settings = {}, encodings = {}, saved
     mcpPort: port(settings.mcpPort, 3221, "MCP 端点端口"),
     policy,
     waitMs: seconds(settings.waitSeconds, 50, 5, 3600, "单次等待秒数") * 1000,
-    shellWaitMs: seconds(settings.shellWaitSeconds, 1200, 0, 86_400, "Shell 等待秒数") * 1000,
     legacyEncoding: encodings.legacyEncoding ?? "gbk",
     consoleEncoding: encodings.consoleEncoding ?? encodings.legacyEncoding ?? "gbk",
     publicUrl,
@@ -63,5 +62,5 @@ export function bridgeParams({ root, token, settings = {}, encodings = {}, saved
 // The settings that force the bridge to restart when they change. The policy is applied live through
 // the console API instead, so it is left off this list.
 export const restartKeys = [
-  "workspaceRoot", "consolePort", "mcpPort", "publicUrl", "tunnel", "relayUrl", "waitSeconds", "shellWaitSeconds",
+  "workspaceRoot", "consolePort", "mcpPort", "publicUrl", "tunnel", "relayUrl", "waitSeconds",
 ];

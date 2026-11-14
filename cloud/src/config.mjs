@@ -25,7 +25,6 @@ export const usage = `用法：node cloud/src/main.mjs [项目根目录] [选项
   --relay <服务器地址>        主动连到自己公网服务器上的中继，例如 https://1.2.3.4（只填一项，公网地址即服务器地址）
   --command-policy <策略>     命令执行策略：ask 每条命令在网页上确认（默认）、allow 全部允许、deny 禁止
   --wait-seconds <秒>         一次等待请求最长挂起多久（默认 50；隧道或云端会更早切断时调小）
-  --shell-wait-seconds <秒>   一条 Shell 等待命令最长挂起多久，0 表示不提供 Shell 等待（默认 1200）
   --legacy-encoding <编码>    非 UTF-8 的文件和命令输出按什么编码处理（默认取系统代码页，中文 Windows 是 gbk）
   --state-dir <目录>          保存访问令牌等状态的目录（默认 ~/.cursor-cloud-bridge）
   --new-token                 重新生成访问令牌（旧令牌立即失效，云端配置要跟着改）
@@ -33,7 +32,8 @@ export const usage = `用法：node cloud/src/main.mjs [项目根目录] [选项
   --help                      显示这段说明
 
 环境变量：
-  CLOUD_BRIDGE_TOKEN          指定访问令牌（至少 24 个字符）；不设置则自动生成并保存在状态目录`;
+  CLOUD_BRIDGE_TOKEN          指定访问令牌（至少 24 个字符）；不设置则自动生成并保存在状态目录
+  CURSOR_API_KEY              你的 Cursor API 密钥。设置后控制台从 Cursor 读取云端 Agent 的思考并显示`;
 
 const port = z.coerce.number().int().min(0).max(65535);
 const optionsSchema = z.object({
@@ -46,7 +46,6 @@ const optionsSchema = z.object({
   relay: z.string().optional(),
   "command-policy": z.enum(["ask", "allow", "deny"]).default("ask"),
   "wait-seconds": z.coerce.number().int().min(5).max(3600).default(50),
-  "shell-wait-seconds": z.coerce.number().int().min(0).max(86_400).default(1200),
   "legacy-encoding": z.enum(legacyEncodings).optional(),
   "state-dir": z.string().min(1).optional(),
   "new-token": z.boolean().default(false),
@@ -125,7 +124,6 @@ export function parseOptions(argv, platform = process.platform) {
     relayUrl: options.relay && normalizeRelayUrl(options.relay),
     policy: options["command-policy"],
     waitMs: options["wait-seconds"] * 1000,
-    shellWaitMs: options["shell-wait-seconds"] * 1000,
     legacyEncoding: options["legacy-encoding"],
     stateDir: options["state-dir"] ?? nodePath.join(os.homedir(), ".cursor-cloud-bridge"),
     newToken: options["new-token"],

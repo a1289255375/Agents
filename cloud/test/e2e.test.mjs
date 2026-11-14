@@ -1,19 +1,15 @@
 // End to end: a real MCP client plays the cloud agent against the running bridge, and the console's
 // HTTP API plays the user at the web page.
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import http from "node:http";
 import nodePath from "node:path";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
-import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { waitTicket } from "../src/auth.mjs";
 import { startBridge } from "../src/main.mjs";
-import { tempDir, windows, writeTree } from "./helpers.mjs";
+import { fakeCursorApi, sse, tempDir, until, windows, writeTree } from "./helpers.mjs";
 
 const token = "test-token-0123456789-abcdefghijklmnop";
 const nodeCommand = (script) => `node ${script}`;
@@ -26,7 +22,7 @@ async function setup(t, overrides = {}) {
   });
   const remembered = [];
   const bridge = await startBridge({
-    root, token, port: 0, mcpPort: 0, policy: "ask", waitMs: 500, shellWaitMs: 1500, legacyEncoding: "gbk", consoleEncoding: "gbk",
+    root, token, port: 0, mcpPort: 0, policy: "ask", waitMs: 500, legacyEncoding: "gbk", consoleEncoding: "gbk",
     rememberPublicUrl: async (url) => { remembered.push(url); },
     ...overrides,
   });
@@ -52,7 +48,7 @@ async function agent(t, url, bearer = token) {
     const { text } = result.content[0];
     return { text, isError: result.isError === true, data: text.startsWith("{") ? JSON.parse(text) : undefined };
   };
-  return { client, call, next: (nextCall) => call(nextCall.name, nextCall.arguments) };
+  return { client, call };
 }
 
 function rawRequest(url, { method = "GET", headers = {} } = {}) {
@@ -64,22 +60,6 @@ function rawRequest(url, { method = "GET", headers = {} } = {}) {
     request.on("error", reject).end();
   });
 }
-
-async function until(check, message) {
-  for (let attempt = 0; attempt < 200; attempt++) {
-    const value = await check();
-    if (value) return value;
-    await sleep(25);
-  }
-  throw new Error(`timed out waiting for: ${message}`);
-}
-
-// A shell poll that began after `since` is in flight. Between two polls the console still shows the
-// previous one, so the start time is what tells a new poll apart.
-const shellPoll = (state, since) => until(async () => {
-  const { waiting } = (await state()).sessions[0];
-  return waiting?.via === "shell" && waiting.since >= since;
-}, "a shell poll to start");
 
 test("the MCP endpoint requires the bearer token", async (t) => {
   const { bridge, state, agent: connectAgent } = await setup(t);
@@ -147,37 +127,38 @@ test("the console answers only local requests and is not reachable through the M
 
 test("drill: connect, wait, receive a task from the web page, change a file, reply, wait again", async (t) => {
   const { root, web, state, agent: connectAgent } = await setup(t);
-  const { client, call, next } = await connectAgent();
+  const { client, call } = await connectAgent();
 
-  const tools = (await client.listTools()).tools.map((tool) => tool.name);
+  const listed = (await client.listTools()).tools;
+  for (const text of [client.getInstructions(), ...listed.map((tool) => tool.description)]) {
+    assert.doesNotMatch(text, /不要结束|不要输出说明|原样执行|原样重新|nextCall|立即再次|立刻执行/, text);
+  }
+  const tools = listed.map((tool) => tool.name);
   assert.deepEqual(tools, [
-    "connect_session", "wait_message", "reply_message", "report_thinking", "report_progress", "disconnect_session",
+    "connect_session", "wait_message", "reply_message", "report_progress", "disconnect_session",
     "project_info", "list_dir", "find_files", "search_text", "read_file", "write_file", "edit_file", "delete_path", "move_path",
     "run_command", "run_program", "run_tests", "command_status", "stop_command",
   ]);
 
-  // connect_session returns at once with the call that starts the wait.
+  // connect_session returns at once, with data only: what to do next is the prompt's business.
   const bind = (await call("connect_session", { name: "演练" })).data;
+  assert.deepEqual(Object.keys(bind), ["event", "id", "name", "project"]);
   assert.equal(bind.event, "bind");
-  assert.deepEqual(bind.nextCall, { name: "wait_message", arguments: { id: bind.id } });
   assert.match(bind.project, new RegExp(`项目根目录：${root.replaceAll("\\", "\\\\")}`));
   assert.deepEqual((await state()).sessions.map(({ id, name }) => ({ id, name })), [{ id: bind.id, name: "演练" }]);
+  const wait = () => call("wait_message", { id: bind.id });
 
-  // Nothing to do yet: the wait times out as "idle" and tells the agent to wait again. Twice.
-  const idle = (await next(bind.nextCall)).data;
-  assert.equal(idle.event, "idle");
-  assert.match(idle.instruction, /立即再次执行 nextCall 继续等待/);
-  assert.equal((await next(idle.nextCall)).data.event, "idle");
+  // Nothing to do yet: the wait times out as "idle". Twice.
+  assert.deepEqual((await wait()).data, { event: "idle", id: bind.id });
+  assert.deepEqual((await wait()).data, { event: "idle", id: bind.id });
 
   // The user types an instruction into the web page while the agent hangs in wait_message.
-  const waiting = next(idle.nextCall);
+  const waiting = wait();
   await until(async () => (await state()).sessions[0].status === "waiting", "session to be waiting");
   const sent = await web(`/api/sessions/${bind.id}/messages`, { method: "POST", body: { text: "把 greeting 改成 你好" } });
   assert.equal(sent.status, 200);
   const task = (await waiting).data;
-  assert.equal(task.event, "message");
-  assert.equal(task.message, "把 greeting 改成 你好");
-  assert.equal(task.redelivered, undefined);
+  assert.deepEqual(task, { event: "message", seq: 1, message: "把 greeting 改成 你好", queued: 0, id: bind.id });
   assert.equal((await state()).sessions[0].status, "working");
 
   // The agent works on the local project through the project tools.
@@ -190,7 +171,7 @@ test("drill: connect, wait, receive a task from the web page, change a file, rep
   assert.equal(edit.text, "已修改 src/app.js：替换 1 处（第 1 行）");
   assert.equal(await fs.readFile(nodePath.join(root, "src/app.js"), "utf8"), "const greeting = '你好';\r\nconsole.log(greeting);\r\n");
   assert.match((await call("write_file", { path: "docs/说明.md", content: "# 说明\n", session })).text, /^已写入 docs\/说明\.md（新建，1 行，utf8，LF）/);
-  assert.equal((await call("report_progress", { id: session, text: "文件已改，正在运行验证" })).data.sent, true);
+  assert.deepEqual((await call("report_progress", { id: session, text: "文件已改，正在运行验证" })).data, { event: "progress", id: session, sent: true, queued: 0 });
 
   // Commands need the user's approval on the web page (default policy "ask").
   const command = await call("run_command", { command: nodeCommand("src/app.js"), session });
@@ -203,11 +184,10 @@ test("drill: connect, wait, receive a task from the web page, change a file, rep
   while (output.includes("仍在运行")) output = (await call("command_status", { jobId: "c1", session })).text;
   assert.match(output, /^\[c1\] 已结束，退出码 0，.*\n你好\n$/s);
 
-  // Reply, then wait again as told.
+  // Reply, then wait again.
   const replied = (await call("reply_message", { id: session, text: "已把 greeting 改成 **你好**，运行输出正常。" })).data;
-  assert.equal(replied.event, "replied");
-  assert.deepEqual(replied.nextCall, bind.nextCall);
-  const again = next(replied.nextCall);
+  assert.deepEqual(replied, { event: "replied", id: session, sent: true, queued: 0 });
+  const again = wait();
   await until(async () => (await state()).sessions[0].status === "waiting", "session to wait again");
 
   // The web page shows the conversation and what the agent did on this machine.
@@ -295,7 +275,7 @@ test("a wait cut off by a dropped connection or a client timeout loses and dupli
   const repeated = (await second.call("wait_message", { id })).data;
   assert.equal(repeated.message, "断线期间的指令");
   assert.equal(repeated.redelivered, true);
-  assert.match(repeated.instruction, /之前已经投递过/);
+  assert.equal(repeated.instruction, undefined);
   assert.equal((await second.call("reply_message", { id, text: "收到" })).data.event, "replied");
   // A retried reply shows up once.
   await second.call("reply_message", { id, text: "收到" });
@@ -369,11 +349,9 @@ test("the user ends or deletes a session from the web page", async (t) => {
   await until(async () => (await state()).sessions[0].status === "waiting", "the wait");
 
   assert.equal((await web(`/api/sessions/${id}/disconnect`, { method: "POST" })).data.status, "disconnected");
-  const ended = (await waiting).data;
-  assert.equal(ended.event, "disconnected");
-  assert.match(ended.instruction, /停止等待/);
-  assert.equal((await call("wait_message", { id })).data.event, "disconnected");
-  assert.equal((await call("reply_message", { id, text: "x" })).data.event, "disconnected");
+  assert.deepEqual((await waiting).data, { event: "disconnected", id });
+  assert.deepEqual((await call("wait_message", { id })).data, { event: "disconnected", id });
+  assert.deepEqual((await call("reply_message", { id, text: "x" })).data, { event: "disconnected", id });
   const refused = await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "x" } });
   assert.deepEqual([refused.status, refused.data.error], [409, "会话已断开，不能再发送消息"]);
   assert.equal((await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "   " } })).status, 400);
@@ -425,182 +403,66 @@ test("the command policy is enforced and can be changed from the web page", asyn
   assert.match((await call("stop_command", { jobId: job.id, session })).text, /已被终止/);
 });
 
-test("shell wait: the curl poll delivers the same events with its own narrow ticket", async (t) => {
-  const { bridge, web, state, agent: connectAgent } = await setup(t);
+test("the agent names itself on connect_session, and its thinking is read from Cursor", async (t) => {
+  const agentId = "bc-0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+  const api = await fakeCursorApi(t, [
+    (req, res) => {
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      res.write(sse("thinking", { text: "用户要我" }, "1"));
+      res.write(sse("thinking", { text: "先读 README" }, "2"));
+      res.write(sse("tool_call", { callId: "c1", name: "mcp", status: "running" }, "3"));
+      res.write(sse("thinking", { text: "README 只有一行" }, "4"));
+    },
+  ]);
+  const { state, agent: connectAgent } = await setup(t, { cursorApiKey: "key_e2e", cursorApiBase: api.base });
   const { call } = await connectAgent();
-  const bind = (await call("connect_session")).data;
+  const bind = (await call("connect_session", { agent: agentId })).data;
+  assert.deepEqual(Object.keys(bind), ["event", "id", "name", "project"]);
   const { id } = bind;
-  const waitUrl = new URL(`/wait/${id}`, bridge.localMcpUrl);
-  const ticket = waitTicket(token, id);
-  const poll = async (bearer) => {
-    const response = await fetch(waitUrl, { headers: bearer ? { Authorization: `Bearer ${bearer}` } : {} });
-    return { status: response.status, type: response.headers.get("content-type"), text: await response.text() };
-  };
 
-  // A loop of short polls: 2 seconds in all, each request answered within the wait budget.
-  assert.equal(bind.shellWait.blockMs, 62_000);
-  assert.equal(bind.shellWait.command, `end=$(($(date +%s)+2)); n=0; while :; do `
-    + `r=$(curl -sS -m 31 -H 'Authorization: Bearer ${ticket}' '${waitUrl}?loop='$$-$end 2>&1); `
-    + `case $r in '{'?event?:?idle?*) n=0;; '{'?event?:?*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
-    + `[ $(date +%s) -ge $end ] && break; done; printf '%s\\n' "$r" | tail -n 1`);
-  assert.match(bind.shellWait.instruction, /不要放进后台或 tmux.*不小于 blockMs 毫秒.*或 2 秒到时/);
+  const thinking = await until(async () => {
+    const items = (await state(id)).session.timeline.filter(({ role }) => role === "thinking");
+    return items.length === 2 && items.map(({ text }) => text);
+  }, "thinking in the console");
+  assert.deepEqual(thinking, ["用户要我先读 README", "README 只有一行"]);
+  // Connecting again with the same agent keeps the one stream.
+  await call("connect_session", { id, agent: agentId });
+  assert.equal(api.requests.length, 1);
+  assert.equal(api.requests[0].url, `/v1/agents/${agentId}/stream`);
+  assert.equal(api.requests[0].headers.authorization, "Bearer key_e2e");
 
-  // The ticket opens this one session's wait and nothing else; the main token is not accepted here.
-  assert.equal((await poll()).status, 401);
-  assert.equal((await poll(token)).status, 401);
-  assert.equal((await poll(waitTicket(token, "00000000"))).status, 401);
-  const other = await fetch(bridge.localMcpUrl, { method: "POST", headers: { Authorization: `Bearer ${ticket}` } });
-  assert.equal(other.status, 401);
-
-  // The loop tells the results apart by how the body starts, so it is one compact JSON object.
-  const started = Date.now();
-  const idle = await poll(ticket);
-  assert.equal(idle.status, 200);
-  assert.match(idle.type, /^application\/json/);
-  assert.match(idle.text, /^\{"event":"idle","id":"[0-9a-f]{8}",/);
-  assert.deepEqual(JSON.parse(idle.text).nextCall, bind.nextCall);
-  assert.ok(Date.now() - started >= 450 && Date.now() - started < 3000);
-  // Between two polls the session still counts as waiting.
-  assert.equal((await state()).sessions[0].status, "waiting");
-
-  const pollStarted = Date.now();
-  const waiting = poll(ticket);
-  await shellPoll(state, pollStarted);
-  await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "经由 curl 收到" } });
-  const delivered = (await waiting).text;
-  assert.match(delivered, /^\{"event":"message",/);
-  assert.equal(JSON.parse(delivered).message, "经由 curl 收到");
-
-  // reply_message hands out the same command again, without repeating the explanation.
-  const replied = (await call("reply_message", { id, text: "好" })).data;
-  assert.deepEqual(replied.shellWait, { command: bind.shellWait.command, blockMs: 62_000 });
+  // Something that is not an agent id is refused at the door.
+  const refused = await call("connect_session", { agent: "$CURSOR_CONVERSATION_ID" });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /agent 应为 Cloud Agent 的 id/);
 });
 
-test("shell wait: a loop the agent left behind cannot take the wait back", async (t) => {
-  const { bridge, web, state, agent: connectAgent } = await setup(t);
-  const { call } = await connectAgent();
-  const { id } = (await call("connect_session")).data;
-  const pollAs = async (loop) => {
-    const url = new URL(`/wait/${id}${loop ? `?loop=${loop}` : ""}`, bridge.localMcpUrl);
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${waitTicket(token, id)}` } });
-    return (await response.json()).event;
-  };
-  // Resolves once the call is in flight; `result` is the call itself.
-  const mcpWait = async () => {
-    const result = call("wait_message", { id });
-    await until(async () => (await state()).sessions[0].waiting?.via === "mcp", "wait_message");
-    return { result };
-  };
-
-  // Between two polls a loop holds no request, so a newer wait finds nothing to supersede.
-  assert.equal(await pollAs("4242-1700000000"), "idle");
-  const live = await mcpWait();
-  // The old loop's next poll is turned away at once and leaves the newer wait alone.
-  assert.equal(await pollAs("4242-1700000000"), "superseded");
-  await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "给 wait_message 的" } });
-  assert.equal((await live.result).data.message, "给 wait_message 的");
-  await call("reply_message", { id, text: "好" });
-
-  // A run of the command started later is a new loop and waits normally.
-  assert.equal(await pollAs("4243-1700000100"), "idle");
-
-  // A poll that names no loop is a wait of its own, and the newest wait wins.
-  assert.equal(await pollAs(), "idle");
-  const older = await mcpWait();
-  const bare = pollAs();
-  assert.equal((await older.result).data.event, "superseded");
-  await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "给没有名字的轮询" } });
-  assert.equal(await bare, "message");
-});
-
-// The command exactly as the agent receives it, run by real shells against the running bridge.
-const shells = ["/bin/sh", "/bin/bash", "/bin/zsh"].filter((shell) => existsSync(shell));
-const runShell = (shell, command) => promisify(execFile)(shell, ["-c", command]);
-
-test("shell wait: the command given to the agent delivers a message", { skip: windows && "cloud agents run it on Linux" }, async (t) => {
-  const { web, state, agent: connectAgent } = await setup(t, { shellWaitMs: 20_000 });
-  const { call } = await connectAgent();
-  const { id, shellWait } = (await call("connect_session")).data;
-  for (const shell of shells) {
-    const text = `it's a "quoted" 指令 for ${shell} with $HOME, \`backticks\`, * and a\nsecond line`;
-    const started = Date.now();
-    const run = runShell(shell, shellWait.command);
-    await shellPoll(state, started);
-    // Several idle polls pass before the message arrives; the loop keeps going without any output.
-    await sleep(1200);
-    await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text } });
-    const { stdout, stderr } = await run;
-    assert.equal(stderr, "");
-    assert.equal(stdout.split("\n").filter(Boolean).length, 1, stdout);
-    assert.equal(JSON.parse(stdout).message, text);
-    await call("reply_message", { id, text: "好" });
+test("without an agent id or an API key the bridge works and shows no thinking", async (t) => {
+  const api = await fakeCursorApi(t, []);
+  const noAgent = await setup(t, { cursorApiKey: "key_e2e", cursorApiBase: api.base });
+  const noKey = await setup(t);
+  for (const [{ web, state, agent: connectAgent }, args] of [[noAgent, {}], [noKey, { agent: "bc-1" }]]) {
+    const { call } = await connectAgent();
+    const { id } = (await call("connect_session", args)).data;
+    const waiting = call("wait_message", { id });
+    await until(async () => (await state()).sessions[0].status === "waiting", "the wait");
+    await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "照常工作" } });
+    assert.equal((await waiting).data.message, "照常工作");
+    assert.deepEqual((await state(id)).session.timeline.filter(({ role }) => role === "thinking"), []);
   }
-});
-
-test("shell wait: the command ends with idle at its deadline, on a newer wait, and after three failures", { skip: windows && "cloud agents run it on Linux" }, async (t) => {
-  const { bridge, web, state, agent: connectAgent } = await setup(t, { shellWaitMs: 2000 });
-  const { call } = await connectAgent();
-  const { id, shellWait } = (await call("connect_session")).data;
-
-  for (const shell of shells) {
-    // Nothing to deliver: polls until the 2 seconds are over, then prints the last idle result once.
-    const started = Date.now();
-    const idle = await runShell(shell, shellWait.command);
-    assert.ok(Date.now() - started >= 1000 && Date.now() - started < 8000, `${Date.now() - started} ms`);
-    assert.equal(idle.stdout.split("\n").filter(Boolean).length, 1, idle.stdout);
-    assert.equal(JSON.parse(idle.stdout).event, "idle");
-    assert.match(JSON.parse(idle.stdout).instruction, /原样重新执行同一条等待命令/);
-
-    // The agent moved on to wait_message while an old loop was still running: the loop stops.
-    const staleStarted = Date.now();
-    const stale = runShell(shell, shellWait.command.replace("+2))", "+60))"));
-    await shellPoll(state, staleStarted);
-    const viaMcp = call("wait_message", { id });
-    assert.equal(JSON.parse((await stale).stdout).event, "superseded");
-    await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: `给 wait_message 的（${shell}）` } });
-    assert.equal((await viaMcp).data.message, `给 wait_message 的（${shell}）`);
-    await call("reply_message", { id, text: "好" });
-  }
-
-  // An address that does not answer, a wrong ticket: three strikes, then the reason on the last line.
-  const quick = shellWait.command.replace("sleep 5", "sleep 0.1").replace("+2))", "+60))");
-  const refused = await runShell("/bin/sh", quick.replace(`:${new URL(bridge.localMcpUrl).port}/wait/`, ":9/wait/"));
-  assert.match(refused.stdout, /^curl: \(7\) /);
-  const denied = await runShell("/bin/sh", quick.replace(/Bearer wt_[\w-]+/, "Bearer wt_wrong"));
-  assert.match(denied.stdout, /Unauthorized/);
-  assert.ok((await state()).bridge.unauthorized >= 3);
-});
-
-test("shell wait is offered only when the public address is known and can be switched off", async (t) => {
-  const { bridge, agent: connectAgent } = await setup(t);
-  const viaTunnel = (headers) => fetch(bridge.localMcpUrl, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...headers },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "connect_session", arguments: {} } }),
-  }).then(async (response) => JSON.parse(JSON.parse(/^data: (.*)$/m.exec(await response.text())[1]).result.content[0].text));
-
-  // A tunnel that keeps the public host name: the address is taken from the request.
-  const forwarded = await viaTunnel({ "X-Forwarded-Host": "abc-def.trycloudflare.com", "X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.9" });
-  assert.ok(forwarded.shellWait.command.includes(` 'https://abc-def.trycloudflare.com/wait/${forwarded.id}?loop='$$-$end 2>&1)`));
-  // A tunnel that rewrites the host to localhost: unknown address, so only wait_message is offered.
-  assert.equal((await viaTunnel({ "X-Forwarded-For": "203.0.113.9" })).shellWait, undefined);
-  // A host name that could break out of the shell command is never used.
-  assert.equal((await viaTunnel({ "X-Forwarded-Host": "a.example';id;'", "X-Forwarded-Proto": "https" })).shellWait, undefined);
-
-  const off = await setup(t, { shellWaitMs: 0 });
-  const { call } = await off.agent();
-  const bind = (await call("connect_session")).data;
-  assert.equal(bind.shellWait, undefined);
-  assert.equal((await fetch(new URL(`/wait/${bind.id}`, off.bridge.localMcpUrl), { headers: { Authorization: `Bearer ${waitTicket(token, bind.id)}` } })).status, 404);
+  assert.equal(api.requests.length, 0);
 });
 
 test("the public address is checked against this very process", async (t) => {
-  const { bridge, web, state, remembered, agent: connectAgent } = await setup(t);
+  const { bridge, web, state, remembered } = await setup(t);
   const base = new URL(bridge.localMcpUrl).origin;
   const before = (await web("/api/connection")).data;
   assert.equal(before.ready, false);
   assert.match(before.config, /https:\/\/<你的隧道地址>\/mcp/);
-  assert.match(before.prompt, /connect_session\(\{\}\)/);
+  // The prompt carries the whole loop; the tool results carry none of it.
+  assert.match(before.prompt, /connect_session[\s\S]*wait_message[\s\S]*reply_message[\s\S]*event=idle[\s\S]*disconnect_session/);
+  assert.match(before.prompt, /CURSOR_CONVERSATION_ID[\s\S]*"agent"/);
+  assert.doesNotMatch(before.prompt, /不要结束|不要输出说明|原样执行|原样重新|nextCall|shellWait|curl/);
 
   // People paste the address with /mcp or a trailing slash.
   const set = await web("/api/public-url", { method: "POST", body: { url: `${base}/mcp/` } });
@@ -613,12 +475,6 @@ test("the public address is checked against this very process", async (t) => {
   assert.deepEqual(JSON.parse(connection.config), {
     mcpServers: { "cursor-cloud-bridge": { url: `${base}/mcp`, headers: { Authorization: `Bearer ${token}` } } },
   });
-
-  // With a known public address the shell wait uses it, whatever host the request came in on.
-  const { call } = await connectAgent();
-  const bind = (await call("connect_session")).data;
-  assert.ok(bind.shellWait.command.includes(`'${base}/wait/${bind.id}?loop='`));
-
   // Another bridge, a foreign server and a dead address are told apart.
   const other = await setup(t);
   const foreign = http.createServer((req, res) => res.end("<html>hello</html>"));
@@ -640,7 +496,7 @@ test("the public address is checked against this very process", async (t) => {
   assert.equal(remembered.at(-1), undefined);
 });
 
-test("drill: thinking, run_program and run_tests through the local bridge", async (t) => {
+test("drill: run_program and run_tests through the local bridge", async (t) => {
   const { root, web, state, agent: connectAgent } = await setup(t, { policy: "allow" });
   await writeTree(root, {
     "package.json": JSON.stringify({ scripts: { test: "node say.js tests" } }),
@@ -653,7 +509,6 @@ test("drill: thinking, run_program and run_tests through the local bridge", asyn
 
   await web(`/api/sessions/${session}/messages`, { method: "POST", body: { text: "跑一下" } });
   assert.equal((await call("wait_message", { id: session })).data.event, "message");
-  assert.equal((await call("report_thinking", { id: session, text: "先跑程序再跑测试" })).data.event, "thinking");
 
   const program = await call("run_program", { session, program: process.execPath, args: ["argv.js", "a b", "x&y"] });
   assert.match(program.text, /^\[c1\] 已结束，退出码 0，.*（直接启动，目录 \.）\n\["a b","x&y"\]\n/s);
@@ -667,11 +522,9 @@ test("drill: thinking, run_program and run_tests through the local bridge", asyn
   assert.match(status, /\[c2\] 已结束，退出码 0，/);
   assert.match(status, /said tests/);
 
-  assert.equal((await call("reply_message", { id: session, text: "都跑完了", thinking: "程序和测试都正常" })).data.event, "replied");
+  assert.equal((await call("reply_message", { id: session, text: "都跑完了" })).data.event, "replied");
   const view = await state(session);
-  assert.deepEqual(view.session.timeline.slice(2).map(({ role, text }) => [role, text]), [
-    ["user", "跑一下"], ["thinking", "先跑程序再跑测试"], ["thinking", "程序和测试都正常"], ["assistant", "都跑完了"],
-  ]);
+  assert.deepEqual(view.session.timeline.slice(2).map(({ role, text }) => [role, text]), [["user", "跑一下"], ["assistant", "都跑完了"]]);
   assert.deepEqual(view.activity.map(({ tool, job }) => [tool, job.tool, job.exitCode]), [["run_program", "run_program", 0], ["run_tests", "run_tests", 0]]);
   assert.deepEqual(view.activity[0].job.changes, { added: ["out.txt"], modified: [], deleted: [] });
   assert.deepEqual([view.activity[0].job.stdoutTail, view.activity[0].job.stderrTail], ['["a b","x&y"]\n', "warn\n"]);

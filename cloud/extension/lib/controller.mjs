@@ -32,7 +32,6 @@ export function createController({ vscode, bridgeApi, context, stateDir = nodePa
       tunnel: config.get("tunnel") ?? "none",
       relayUrl: config.get("relayUrl") ?? "",
       waitSeconds: config.get("waitSeconds"),
-      shellWaitSeconds: config.get("shellWaitSeconds"),
       autoStart: config.get("autoStart") ?? true,
     };
   };
@@ -90,6 +89,7 @@ export function createController({ vscode, bridgeApi, context, stateDir = nodePa
       });
       running = await bridgeApi.startBridge({
         ...params,
+        cursorApiKey: process.env.CURSOR_API_KEY,
         rememberPublicUrl: (url) => state.save({ publicUrl: url }),
         log: (text) => output.appendLine(text),
       });

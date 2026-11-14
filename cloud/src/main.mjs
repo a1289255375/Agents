@@ -16,6 +16,7 @@ import { startConsole, startMcpEndpoint } from "./http.mjs";
 import { createProject, policyLabels } from "./project/index.mjs";
 import { PathError } from "./project/paths.mjs";
 import { startRelayLink } from "./relay-link.mjs";
+import { createThinkingRelay } from "./thinking.mjs";
 import { startCloudflared } from "./tunnel.mjs";
 
 const serverName = "cursor-cloud-bridge";
@@ -23,8 +24,8 @@ const selfTestTimeoutMs = 10_000;
 const tunnelProbeDelaysMs = [3000, 5000, 10_000, 15_000, 30_000];
 
 export async function startBridge({
-  root, token, port, mcpPort, mcpHost = "127.0.0.1", policy, waitMs, shellWaitMs, legacyEncoding, consoleEncoding,
-  publicUrl, tunnel, relayUrl, rememberPublicUrl = async () => {}, log = () => {},
+  root, token, port, mcpPort, mcpHost = "127.0.0.1", policy, waitMs, legacyEncoding, consoleEncoding,
+  publicUrl, tunnel, relayUrl, cursorApiKey, cursorApiBase, rememberPublicUrl = async () => {}, log = () => {},
 }) {
   const hub = createHub();
   const project = await createProject({
@@ -33,9 +34,11 @@ export async function startBridge({
   const bridge = {
     instance: randomBytes(8).toString("hex"),
     // In relay mode the relay address is the public address the agent uses.
-    token, waitMs, shellWaitMs, commandWaitMs: waitMs, publicUrl: publicUrl ?? relayUrl, unauthorized: 0,
+    token, waitMs, commandWaitMs: waitMs, publicUrl: publicUrl ?? relayUrl, unauthorized: 0,
   };
-  const mcp = await startMcpEndpoint({ bridge, hub, project, port: mcpPort, host: mcpHost });
+  const thinking = cursorApiKey ? createThinkingRelay({ hub, apiKey: cursorApiKey, apiBase: cursorApiBase }) : undefined;
+  if (!thinking) log("没有设置环境变量 CURSOR_API_KEY，控制台不会显示云端 Agent 的思考。在 Cursor 控制台 → API Keys 生成密钥，设为这个环境变量后重启云端桥。");
+  const mcp = await startMcpEndpoint({ bridge, hub, project, thinking, port: mcpPort, host: mcpHost });
   const localMcpUrl = `http://127.0.0.1:${mcp.port}/mcp`;
 
   // Fetches the public address from here and checks that it leads back to this very process.
@@ -140,7 +143,6 @@ export async function startBridge({
       tunnel: bridge.tunnel ?? null,
       unauthorized: bridge.unauthorized,
       waitSeconds: waitMs / 1000,
-      shellWaitSeconds: shellWaitMs / 1000,
       jobs: project.commands.list().filter((job) => job.state === "awaiting_approval" || job.state === "running"),
     }),
 
@@ -186,6 +188,7 @@ export async function startBridge({
     async stop() {
       stopTunnel?.();
       stopRelay?.();
+      thinking?.stop();
       project.commands.shutdown();
       await Promise.all([mcp.server, web.server].map((server) => new Promise((resolve) => {
         server.close(resolve);
@@ -251,8 +254,8 @@ async function cli(argv) {
     bridge = await startBridge({
       root, token, publicUrl, ...encodings,
       port: options.port, mcpPort: options.mcpPort, mcpHost: options.mcpHost, tunnel: options.tunnel,
-      relayUrl: options.relayUrl,
-      policy: options.policy, waitMs: options.waitMs, shellWaitMs: options.shellWaitMs,
+      relayUrl: options.relayUrl, cursorApiKey: process.env.CURSOR_API_KEY,
+      policy: options.policy, waitMs: options.waitMs,
       rememberPublicUrl: (url) => state.save({ publicUrl: url }),
       log: (text) => console.log(`\n${text}`),
     });

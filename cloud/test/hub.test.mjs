@@ -3,7 +3,7 @@ import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { createHub, SessionError, sessionIdPattern } from "../src/hub.mjs";
 
-const hold = { holdMs: 5000, via: "mcp" };
+const hold = { holdMs: 5000 };
 const roles = (hub, id) => hub.detail(id).timeline.map(({ role, text, state }) => (state ? `${role}:${text}:${state}` : `${role}:${text}`));
 
 test("connect binds a session and an idle wait returns idle", async () => {
@@ -14,9 +14,9 @@ test("connect binds a session and an idle wait returns idle", async () => {
   assert.equal(hub.connect({ name: "重构任务" }).name, "重构任务");
   assert.deepEqual(hub.summaries().map(({ name, status }) => [name, status]), [["重构任务", "active"], ["云端会话 1", "active"]]);
 
-  const pending = hub.wait(session.id, { holdMs: 40, via: "mcp" });
+  const pending = hub.wait(session.id, { holdMs: 40 });
   assert.equal(hub.detail(session.id).status, "waiting");
-  assert.deepEqual(hub.detail(session.id).waiting.via, "mcp");
+  assert.equal(hub.detail(session.id).waiting.holdMs, 40);
   assert.deepEqual(await pending, { event: "idle" });
   assert.equal(hub.detail(session.id).hint, undefined);
 });
@@ -25,9 +25,9 @@ test("an idle loop keeps the waiting status between two waits", async () => {
   let clock = 1_000_000;
   const hub = createHub({ now: () => clock });
   const { id } = hub.connect({});
-  assert.deepEqual(await hub.wait(id, { holdMs: 20, via: "shell" }), { event: "idle" });
+  assert.deepEqual(await hub.wait(id, { holdMs: 20 }), { event: "idle" });
   assert.equal(hub.detail(id).status, "waiting");
-  assert.deepEqual(hub.detail(id).waiting, { via: "shell", since: 1_000_000, holdMs: 20 });
+  assert.deepEqual(hub.detail(id).waiting, { since: 1_000_000, holdMs: 20 });
 
   // The loop stopped: nobody came back for the next wait.
   clock += 16_000;
@@ -35,14 +35,14 @@ test("an idle loop keeps the waiting status between two waits", async () => {
   assert.equal(hub.detail(id).waiting, undefined);
 
   // Anything else the agent does shows it is no longer just waiting.
-  await hub.wait(id, { holdMs: 20, via: "mcp" });
+  await hub.wait(id, { holdMs: 20 });
   assert.equal(hub.detail(id).status, "waiting");
   hub.progress(id, "顺手做点别的");
   assert.equal(hub.detail(id).status, "active");
-  await hub.wait(id, { holdMs: 20, via: "mcp" });
+  await hub.wait(id, { holdMs: 20 });
   hub.record({ session: id, tool: "read_file", ok: true, target: "a.txt" });
   assert.equal(hub.detail(id).status, "active");
-  await hub.wait(id, { holdMs: 20, via: "mcp" });
+  await hub.wait(id, { holdMs: 20 });
   assert.equal(hub.connect({ id }).id, id);
   assert.equal(hub.detail(id).status, "active");
 });
@@ -63,7 +63,7 @@ test("a message wakes the pending wait and stays until the reply acknowledges it
   assert.equal(hub.detail(id).preview, "改好了");
 
   // Nothing is left to deliver.
-  assert.deepEqual(await hub.wait(id, { holdMs: 30, via: "mcp" }), { event: "idle" });
+  assert.deepEqual(await hub.wait(id, { holdMs: 30 }), { event: "idle" });
 });
 
 test("messages sent while the agent is busy queue up and arrive one per wait", async () => {
@@ -92,7 +92,7 @@ test("a delivery whose response was lost is delivered again, and never after the
   assert.deepEqual(hub.wait(id, hold), { event: "message", seq: 1, message: "任务", redelivered: true, queued: 0 });
   assert.deepEqual(hub.wait(id, hold), { event: "message", seq: 1, message: "任务", redelivered: true, queued: 0 });
   hub.reply(id, "完成");
-  assert.deepEqual(await hub.wait(id, { holdMs: 30, via: "mcp" }), { event: "idle" });
+  assert.deepEqual(await hub.wait(id, { holdMs: 30 }), { event: "idle" });
 });
 
 test("a retried reply is shown once, an identical answer to a new message is kept", () => {
@@ -111,7 +111,7 @@ test("a retried reply is shown once, an identical answer to a new message is kep
 test("a newer wait supersedes the older one and the cut-off is remembered as a hint", async () => {
   const hub = createHub();
   const { id } = hub.connect({});
-  const first = hub.wait(id, { holdMs: 5000, via: "mcp" });
+  const first = hub.wait(id, { holdMs: 5000 });
   await sleep(30);
   const second = hub.wait(id, hold);
   assert.deepEqual(await first, { event: "superseded" });
@@ -122,45 +122,6 @@ test("a newer wait supersedes the older one and the cut-off is remembered as a h
   // Only the newest wait receives the message.
   hub.send(id, "给新的等待");
   assert.equal((await second).message, "给新的等待");
-});
-
-test("a polling loop that was replaced cannot take the wait back", async () => {
-  const hub = createHub();
-  const { id } = hub.connect({});
-  const poll = (loop, holdMs = 5000) => hub.wait(id, { holdMs, via: "shell", loop });
-
-  // The polls of one loop follow each other without superseding anything.
-  assert.deepEqual(await poll("a", 20), { event: "idle" });
-  const inFlight = poll("a");
-
-  // The agent moved on to wait_message: the poll in flight ends, and so does the loop's next one.
-  const viaMcp = hub.wait(id, hold);
-  assert.deepEqual(await inFlight, { event: "superseded" });
-  assert.deepEqual(poll("a"), { event: "superseded" });
-  assert.equal(hub.detail(id).waiting.via, "mcp");
-  // Leaving a shell loop is no sign of a connection being cut.
-  assert.equal(hub.detail(id).hint, undefined);
-
-  // A loop started later is the newest wait. The one it replaces stays out as well.
-  const next = poll("b");
-  assert.deepEqual(await viaMcp, { event: "superseded" });
-  const newer = poll("c");
-  assert.deepEqual(await next, { event: "superseded" });
-  assert.deepEqual(poll("b"), { event: "superseded" });
-  assert.deepEqual(poll("a"), { event: "superseded" });
-
-  hub.send(id, "给最新的循环");
-  assert.equal((await newer).message, "给最新的循环");
-  // The loop that got the message goes on after the reply.
-  hub.reply(id, "好");
-  assert.deepEqual(await poll("c", 20), { event: "idle" });
-
-  // A poll that is cut off says nothing either: the shell tool stopping the command looks the same.
-  const controller = new AbortController();
-  const cut = hub.wait(id, { holdMs: 5000, via: "shell", loop: "c", signal: controller.signal });
-  controller.abort();
-  assert.deepEqual(await cut, { event: "aborted" });
-  assert.equal(hub.detail(id).hint, undefined);
 });
 
 test("an aborted wait loses nothing: the message is delivered to the next wait", async () => {
@@ -179,7 +140,7 @@ test("an aborted wait loses nothing: the message is delivered to the next wait",
 
   // A wait that runs its full length clears the hint.
   hub.reply(id, "ok");
-  await hub.wait(id, { holdMs: 30, via: "mcp" });
+  await hub.wait(id, { holdMs: 30 });
   assert.equal(hub.detail(id).hint, undefined);
 });
 
@@ -319,24 +280,27 @@ test("a key always leads back to the same session", () => {
   assert.notEqual(hub.connect({ key: "conversation-1" }).id, first.id);
 });
 
-test("thinking is kept in the timeline, on its own and in front of a reply", async () => {
+test("thinking deltas of one block grow one timeline item", async () => {
   const hub = createHub();
   const { id } = hub.connect({});
   hub.send(id, "修复登录");
   hub.wait(id, hold);
-  assert.deepEqual(hub.think(id, "先看 auth.js"), { event: "thinking", queued: 0 });
+  hub.think(id, "先看", 0);
+  hub.think(id, " auth.js", 0);
+  // A message that arrives in the middle of a block splits it where it landed.
   hub.send(id, "第二件事");
-  assert.deepEqual(hub.think(id, "问题在令牌过期判断"), { event: "thinking", queued: 1 });
-  assert.deepEqual(hub.reply(id, "修好了", "改了过期判断，补了测试"), { event: "replied", queued: 1 });
-  // A retried reply shows neither the answer nor its thinking twice.
-  hub.reply(id, "修好了", "改了过期判断，补了测试");
+  hub.think(id, "，再看测试", 0);
+  hub.think(id, "问题在令牌过期判断", 1);
+  hub.note(id, "读不到思考");
+  assert.deepEqual(hub.reply(id, "修好了"), { event: "replied", queued: 1 });
   assert.deepEqual(roles(hub, id).slice(1), [
-    "user:修复登录:done", "thinking:先看 auth.js", "user:第二件事:queued", "thinking:问题在令牌过期判断",
-    "thinking:改了过期判断，补了测试", "assistant:修好了",
+    "user:修复登录:done", "thinking:先看 auth.js", "user:第二件事:queued", "thinking:，再看测试",
+    "thinking:问题在令牌过期判断", "note:读不到思考", "assistant:修好了",
   ]);
-  assert.deepEqual([hub.detail(id).delivered, hub.detail(id).acked], [1, 1]);
   assert.equal(hub.summaries()[0].preview, "修好了");
 
+  assert.equal(hub.isOpen(id), true);
   hub.disconnect(id, "user");
-  assert.deepEqual(hub.think(id, "太晚了"), { event: "disconnected" });
+  assert.equal(hub.isOpen(id), false);
+  assert.equal(hub.isOpen("00000000"), false);
 });

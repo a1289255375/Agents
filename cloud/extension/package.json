@@ -75,11 +75,6 @@
           "default": 50,
           "description": "一次等待请求最长挂起多久（秒）。隧道或云端会更早切断时调小。"
         },
-        "cursorCloudBridge.shellWaitSeconds": {
-          "type": "number",
-          "default": 1200,
-          "description": "一条 Shell 等待命令最长挂起多久（秒），0 表示不提供 Shell 等待。"
-        },
         "cursorCloudBridge.autoStart": {
           "type": "boolean",
           "default": true,
