@@ -82,8 +82,9 @@ node cloud/extension/build.mjs --out D:\tmp\ccb.vsix  # 指定输出路径
 | `workspaceRoot` | 工作区根目录，留空用当前工作区第一个文件夹 |
 | `commandPolicy` | 命令执行策略：`ask`（默认，逐条确认）、`allow`、`deny`。运行中也可用命令或控制台切换 |
 | `consolePort` / `mcpPort` | 控制台（默认 3220）和 MCP 端点（默认 3221）端口 |
-| `publicUrl` | 隧道公网地址；`tunnel` 为 `cloudflared` 时忽略 |
-| `tunnel` | `none` 或 `cloudflared`（启动时顺带起快速隧道） |
+| `publicUrl` | 隧道公网地址；`tunnel` 为 `cloudflared` 或填了 `relayUrl` 时忽略 |
+| `relayUrl` | 自建公网中继的地址，例如 `https://1.2.3.4` 或 `1.2.3.4`（默认按 https）。填了就自动进入中继模式，见[自建公网中继](#自建公网中继可选不经第三方隧道) |
+| `tunnel` | `none`、`cloudflared`（启动时顺带起快速隧道）或 `relay`（连 `relayUrl` 的中继；只填 `relayUrl` 也会自动进入） |
 | `waitSeconds` / `shellWaitSeconds` | 单次等待和 Shell 等待的上限秒数 |
 | `autoStart` | IDE 启动后是否自动运行云端桥 |
 
@@ -228,6 +229,66 @@ frp 的做法是在云服务器上运行 `frps`，本机运行 `frpc` 把 `127.0
 
 快速隧道的地址变了以后：把新地址更新到 cursor.com 的 MCP 配置里，再让 Cloud Agent 重新接入。正在运行的 Cloud Agent 会不会自动用上新地址没有确认过，稳妥的做法是新开一个 Agent。
 
+## 自建公网中继（可选，不经第三方隧道）
+
+有一台带公网 IP 的 Linux 服务器时，可以不用 Cloudflare 等第三方隧道，改用仓库自带的中继：插件主动从你的电脑连到你服务器上的中继，Cursor 后端把 MCP 请求发到中继，中继再经这条已经建立的连接转回你的电脑。你家里/公司网络**不用开任何入站端口**。
+
+```text
+  Cloud Agent（Cursor 后端）
+      │  https://<服务器IP>:<端口>/mcp
+      ▼
+  你的公网服务器：中继（cloud/relay，Node 22，无第三方依赖）
+      ▲  插件主动发起的出站长连接（HTTP Upgrade + 帧多路复用）
+══════╪══════════════════════════  以下都在你的 Windows 电脑上
+      ▼
+  MCP 端点 127.0.0.1:3221  ◄─  云端桥（插件）
+```
+
+### 为什么是这个形状
+
+- **无第三方依赖的 Node 中继**：中继只用 Node 22 内置能力（`http`/`https`、`crypto`），不装任何 npm 包，部署和审计都简单。它只在 Cursor 和插件之间转发字节，不执行命令、不落盘。代码在 [`relay/`](relay/)。
+- **插件出站、家里不开端口**：插件用 HTTP Upgrade 向中继发起一条出站长连接，中继在这条连接上用一个很小的帧协议（`[流号][类型][长度][负载]`）多路复用并发请求。这样 Cursor 的每个请求都能即时逐块转发——SSE 和约 50 秒的 `wait_message` 长轮询都不会被缓冲到结束才发。
+- **按令牌哈希路由**：插件注册时只上报 `sha256(令牌)`，中继只在内存里记这个哈希，从不接触令牌本身，也不记录令牌。Cursor 请求带的 `Authorization: Bearer 令牌`，中继按 `sha256(令牌)` 找到对应插件转发；对不上任何已连接插件就回 401；到了你电脑上，本地桥仍然照常校验令牌。
+- **自动重连**：中继重启或网络抖动把连接断了，插件会自己退避重连接回去，`wait_message` 的消息在重连期间不会丢。
+- **选 HTTP Upgrade 帧多路复用而不是 WebSocket**：Node 22 有内置 WebSocket 客户端但没有内置 WebSocket 服务端，自己实现中继端的多路复用比手搓 WebSocket 握手/分片更少代码、更可控。
+
+### 证书与明文的取舍（重要）
+
+理想情况是中继用受信任的 HTTPS 证书，令牌和流量全程加密。但在中国大陆的云服务器上实测发现：**入站 80、443、8080、8443 常被运营商按 ICP 备案策略封掉**（在服务器上监听、从外部访问全部超时），而其它高位端口畅通。这带来一个硬限制：
+
+- Let's Encrypt 给**裸 IP** 签证书只支持 HTTP-01（走 80 端口）和 TLS-ALPN-01（走 443 端口），裸 IP 不支持 DNS-01。80 和 443 都被封 ⇒ **拿不到任何受信任证书**。sslip.io 这类“把 IP 变域名”的办法也一样：HTTP-01 仍要 80 端口，DNS-01 又改不了它的 DNS 记录。自签证书则会被 Cursor 后端拒绝（没法让 Cursor 跳过证书校验）。
+
+所以 80/443 被封时只能退到**高位端口的明文 HTTP**（`deploy.sh --insecure-http`）。代价和缓解：
+
+- **风险**：Cursor 后端到中继这一段是明文，`Authorization` 里的令牌和全部 MCP 流量（文件内容、命令输出）在公网上不加密传输，跨境链路上可能被旁路截获。插件到中继那一段只传令牌哈希，不传令牌本身。
+- **缓解**：令牌是 256 位随机数；命令策略默认 `ask`（每条命令要你在网页确认）；不用时停掉；令牌一旦可能泄露，用“重新生成访问令牌”换一个。
+- **要全程加密，两条升级路**：① 给服务器完成 ICP 备案、放开 80/443，再用 `deploy.sh`（默认 TLS 模式）申请裸 IP 证书；② 你有域名并能改它的 DNS：用 DNS-01（不需要入站 80/443）签 `relay.你的域名` 的证书，把 A 记录指到服务器 IP，中继在高位端口上用这张证书起 HTTPS——证书按域名校验，端口不影响信任。
+
+### 怎么部署（服务器端）
+
+`deploy.sh` 是可重复执行的幂等脚本：自己装 Node 22、装中继代码、建 systemd 服务（以非 root 的 `cursor-relay` 用户运行，用 `CAP_NET_BIND_SERVICE` 绑低端口）。TLS 模式还会用 [lego](https://github.com/go-acme/lego) 申请裸 IP 证书并装一个每日续期的 systemd 定时器。
+
+把 `cloud/src` 和 `cloud/relay` 放到服务器上（结构保持 `cloud/src`、`cloud/relay` 两个目录），用 root 运行（`<服务器IP>` 换成你的公网 IP）：
+
+```bash
+# 80/443 可用（已备案）：TLS，中继监听 443
+./deploy.sh --ip <服务器IP> --email you@example.com
+
+# 80/443 被封：明文 HTTP，中继监听一个高位端口（例如 18443）
+./deploy.sh --ip <服务器IP> --insecure-http --port 18443
+```
+
+脚本跑完会打印健康检查命令和要在插件里填的地址。它改动的系统项只有：`/opt/cursor-bridge-relay`（代码和 Node）、`/etc/cursor-bridge-relay`（配置，TLS 模式下还有证书）、`cursor-relay` 系统用户、systemd 单元 `cursor-bridge-relay.service`（TLS 模式另有 `*-renew.service/.timer`）。**回滚**：`systemctl disable --now cursor-bridge-relay`（TLS 再加 `cursor-bridge-relay-renew.timer`），删掉这些单元、`/opt/cursor-bridge-relay`、`/etc/cursor-bridge-relay` 和 `cursor-relay` 用户即可。中继服务器无法从外网下二进制时，可在能联网的机器下好后用 `NODE_TARBALL=... LEGO_TARBALL=... ./deploy.sh ...` 传入。
+
+### 怎么用（插件 / 命令行）
+
+- **插件**：在设置 `cursorCloudBridge.relayUrl` 里填服务器地址即可——**只填这一项**就自动进入中继模式。TLS 模式填 `https://<服务器IP>`（或直接 `<服务器IP>`，默认按 https）；明文高位端口模式填 `http://<服务器IP>:18443`。再运行“准备云端接入”，给出的 MCP URL 就是这个地址加 `/mcp`。
+- **命令行 / `start-cloud.cmd`**：加 `--relay`：
+  ```powershell
+  .\start-cloud.cmd "D:\work\my-project" --relay http://<服务器IP>:18443
+  ```
+- cursor.com 上 MCP 配置的 URL 用 `http(s)://<服务器IP>:<端口>/mcp`，请求头仍是 `Authorization: Bearer 你的令牌`。中继在插件断线时会自动重连，服务器上的中继进程一直在跑，无需你干预。
+
 ## 挂起等待是怎么保持的
 
 MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以“一直挂起”是由一连串短等待接起来的，提示词要求 Cloud Agent 在每次等待结束后立刻再等，不结束当前这一轮。
@@ -305,6 +366,7 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
   --mcp-host <地址>           MCP 端点监听地址（默认 127.0.0.1；隧道客户端不在本机时才需要改）
   --public-url <地址>         隧道的公网地址，例如 https://bridge.example.com（会记住，下次不用再写）
   --tunnel cloudflared        启动时顺带运行 cloudflared 快速隧道（需要已安装 cloudflared）
+  --relay <服务器地址>        主动连到自己公网服务器上的中继，例如 https://1.2.3.4（只填一项，公网地址即服务器地址）
   --command-policy <策略>     命令执行策略：ask 每条命令在网页上确认（默认）、allow 全部允许、deny 禁止
   --wait-seconds <秒>         一次等待请求最长挂起多久（默认 50；隧道或云端会更早切断时调小）
   --shell-wait-seconds <秒>   一条 Shell 等待命令最长挂起多久，0 表示不提供 Shell 等待（默认 1200）
@@ -373,6 +435,7 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 - 经 cloudflared 快速隧道的全流程：接入、等待、下指令、改文件、确认命令、回复、再等待。扮演 Cloud Agent 的是官方 MCP SDK 的客户端。
 - 挂起等待：一个会话用 `wait_message` 经隧道连续挂了 30 分钟（空等返回 36 次，中间处理了一条指令）；Shell 等待命令在没有消息时挂满 20 分钟后返回 `idle`（实测 1204 秒）。
 - Shell 等待命令在 dash、bash、zsh、busybox ash 下运行；也由一个真实 Cloud Agent 的终端工具经隧道执行过，指令一到命令就返回。
+- 自建中继全流程：把中继用 `deploy.sh --insecure-http` 部署到一台真实的公网 Linux 服务器（systemd、非 root 运行），开发机上的云端桥以中继模式主动连上去，官方 MCP SDK 客户端经 `http://<服务器IP>:18443/mcp` 列工具、开两个会话、下指令、回传思考、改文件、`run_command` 拿到 stdout/stderr/退出码、回复。其中一次 `wait_message` 经公网中继实测挂满 50.6 秒才返回 `idle`（**没有被缓冲**，期间下的指令约 0.9 秒就送达）；把中继服务重启一次，插件约 1.5 秒自动重连，会话继续。
 - 在 Chrome 里实际操作网页控制台。
 
 **没有验证**：系统代码页本身就是 936 的中文版 Windows（测试里是把控制台切到 936 来模拟）；双击启动和 `--open` 打开浏览器；Windows 上运行 cloudflared；真实的 Cloud Agent 接入；中国大陆的网络环境。
@@ -423,7 +486,10 @@ cloud/
   src/hub.mjs         会话、消息队列、操作记录
   src/auth.mjs        令牌和 Shell 等待票据
   src/tunnel.mjs      cloudflared 快速隧道
+  src/relay-mux.mjs   中继帧多路复用（中继服务端和插件链路共用）
+  src/relay-link.mjs  插件侧：主动连中继、把请求转到本机 MCP 端点
   src/project/        路径限制、编码、文件、搜索、命令执行
+  relay/              公网服务器上的中继：relay.mjs 路由、server.mjs 可执行、deploy.sh 部署脚本
   web/                网页控制台
   prompt.md           发给 Cloud Agent 的提示词
   test/               自动化测试
