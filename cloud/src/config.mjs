@@ -75,11 +75,17 @@ export function normalizePublicUrl(input) {
   return url.origin + url.pathname.replace(/\/+$/, "").replace(/\/mcp$/, "");
 }
 
-// The relay address is the public address too, so it is accepted the same way as a public URL, but a
-// bare host like "1.2.3.4" is assumed to be https so the user only has to type the server address.
+// The relay address is the public address too, so it is accepted the same way as a public URL.
+// A bare host like "1.2.3.4" defaults to https. An explicit non-443 port (e.g. "1.2.3.4:18443")
+// defaults to http: those high ports are what --insecure-http uses when 80/443 are blocked, and
+// forcing https there makes the plugin dial TLS at a plaintext listener and never register a link.
 export function normalizeRelayUrl(input) {
   const trimmed = input.trim();
-  return normalizePublicUrl(/^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`);
+  if (/^https?:\/\//i.test(trimmed)) return normalizePublicUrl(trimmed);
+  const withPort = /^(\[[^\]]+\]|[^:/]+)(?::(\d+))?$/.exec(trimmed);
+  const port = withPort?.[2];
+  const scheme = port && port !== "443" ? "http" : "https";
+  return normalizePublicUrl(`${scheme}://${trimmed}`);
 }
 
 export function parseOptions(argv, platform = process.platform) {

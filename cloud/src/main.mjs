@@ -53,6 +53,14 @@ export async function startBridge({
           result = { ok: true, message: "从本机访问这个地址能到达本服务" };
         } else if (data?.service === serverName) {
           result = { ok: false, message: "这个地址通到了另一个云端桥进程。检查是否开了两个，或隧道指向了别的端口" };
+        } else if (data?.service === "cursor-bridge-relay" || data?.error === "no bridge connected") {
+          // Hit the public relay, but this process has not registered a link for the current token.
+          result = {
+            ok: false,
+            message: relayUrl
+              ? `公网中继在线，但本机还没连上它（HTTP ${response.status}）。看输出面板有没有“relay 链路已连接”；没有的话用“重启云端桥”，并确认设置 cursorCloudBridge.relayUrl 是 http://主机:端口（这台服务器是明文，不要写成 https）`
+              : `这个地址是公网中继，不是隧道出口（HTTP ${response.status}）。请把地址填进设置 cursorCloudBridge.relayUrl（不要只填在“连接配置”里），然后重启云端桥。示例：http://1.2.3.4:18443`,
+          };
         } else {
           result = { ok: false, message: `这个地址有响应（HTTP ${response.status}），但不是本服务。检查隧道是否指向 http://127.0.0.1:${mcp.port}` };
         }

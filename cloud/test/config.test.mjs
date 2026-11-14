@@ -61,6 +61,10 @@ test("options: every option is read", () => {
   assert.equal(parseOptions(["--tunnel", "cloudflared"]).tunnel, "cloudflared");
   assert.equal(parseOptions(["--relay", "36.138.159.226"]).relayUrl, "https://36.138.159.226");
   assert.equal(parseOptions(["--relay", "https://relay.example.com:8443/mcp"]).relayUrl, "https://relay.example.com:8443");
+  // High ports default to http: that's what --insecure-http listens on when 80/443 are blocked.
+  assert.equal(parseOptions(["--relay", "36.138.159.226:18443"]).relayUrl, "http://36.138.159.226:18443");
+  assert.equal(parseOptions(["--relay", "http://36.138.159.226:18443"]).relayUrl, "http://36.138.159.226:18443");
+  assert.equal(parseOptions(["--relay", "1.2.3.4:443"]).relayUrl, "https://1.2.3.4");
 });
 
 test("options: the project root survives Windows quoting accidents", () => {

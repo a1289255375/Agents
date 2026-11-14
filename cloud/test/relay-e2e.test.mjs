@@ -141,3 +141,29 @@ test("relay e2e: the bridge reconnects the link on its own and the agent keeps w
   await web(`/api/sessions/${id}/messages`, { method: "POST", body: { text: "断线重连后还能用" } });
   assert.equal((await waiting).data.message, "断线重连后还能用");
 });
+
+// Pasting the relay into “连接配置” without setting relayUrl never dials the link; self-test must
+// say so instead of the generic “不是本服务 / 检查隧道” message the user was hitting.
+test("relay e2e: pasting the relay as a public URL alone explains that relayUrl is required", async (t) => {
+  const root = await tempDir(t);
+  await writeTree(root, { "a.txt": "x" });
+  const relay = createRelay({ log: () => {} });
+  const relayServer = createServer(relay.handleRequest);
+  relayServer.on("upgrade", relay.handleUpgrade);
+  const relayPort = await listen(relayServer);
+  t.after(() => { relay.close(); relayServer.closeAllConnections?.(); relayServer.close(); });
+  const relayUrl = `http://127.0.0.1:${relayPort}`;
+
+  const bridge = await startBridge({
+    root, token, port: 0, mcpPort: 0, policy: "allow", waitMs: 1500, shellWaitMs: 0,
+    legacyEncoding: "gbk", consoleEncoding: "gbk", publicUrl: relayUrl,
+  });
+  t.after(() => bridge.stop());
+
+  const response = await fetch(new URL("/api/selftest", bridge.consoleUrl), { method: "POST" });
+  const data = await response.json();
+  assert.equal(data.ok, false);
+  assert.match(data.message, /公网中继/);
+  assert.match(data.message, /relayUrl/);
+  assert.equal(relay.linkCount, 0);
+});

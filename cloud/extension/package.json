@@ -62,7 +62,7 @@
         "cursorCloudBridge.relayUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "你自己公网服务器上中继的地址，例如 `https://1.2.3.4` 或直接填 `1.2.3.4`（默认按 https）。**填了这一项就自动用中继模式**：插件主动连到服务器，家里不用开入站端口，云端 MCP 配置的 URL 就是这个地址加 `/mcp`。留空则按 tunnel/publicUrl。"
+          "markdownDescription": "你自己公网服务器上中继的地址。**填了这一项就自动用中继模式**：插件主动连到服务器，家里不用开入站端口，云端 MCP 配置的 URL 就是这个地址加 `/mcp`。明文中继必须带协议和端口，例如 `http://1.2.3.4:18443`；只填 `1.2.3.4` 会按 https。不要把中继地址只填在“连接配置”的公网地址栏——那里不会建立出站链路。留空则按 tunnel/publicUrl。"
         },
         "cursorCloudBridge.tunnel": {
           "type": "string",
