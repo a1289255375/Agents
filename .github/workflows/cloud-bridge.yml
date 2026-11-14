@@ -45,3 +45,21 @@ jobs:
           if (Get-Command pwsh.exe -ErrorAction SilentlyContinue) { throw 'pwsh.exe is still on PATH' }
           npm test
           exit $LASTEXITCODE
+
+  # Builds the installable .vsix so packaging breakage (staging, deps, manifest) is caught too.
+  package:
+    name: Package vsix
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node cloud/extension/build.mjs --out cursor-cloud-bridge.vsix
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cursor-cloud-bridge-vsix
+          path: cursor-cloud-bridge.vsix
