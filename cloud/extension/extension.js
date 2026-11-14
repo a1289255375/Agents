@@ -33,6 +33,7 @@ async function activate(context) {
     resolveToken: config.resolveToken,
     detectEncodings: config.detectEncodings,
     normalizePublicUrl: config.normalizePublicUrl,
+    normalizeRelayUrl: config.normalizeRelayUrl,
     newToken: auth.newToken,
   };
   controller = createController({ vscode, bridgeApi, context });

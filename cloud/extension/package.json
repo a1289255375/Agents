@@ -57,13 +57,18 @@
         "cursorCloudBridge.publicUrl": {
           "type": "string",
           "default": "",
-          "description": "隧道的公网地址，例如 https://bridge.example.com。tunnel 设为 cloudflared 时忽略此项。"
+          "description": "隧道的公网地址，例如 https://bridge.example.com。tunnel 设为 cloudflared 或填了 relayUrl 时忽略此项。"
+        },
+        "cursorCloudBridge.relayUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "你自己公网服务器上中继的地址，例如 `https://1.2.3.4` 或直接填 `1.2.3.4`（默认按 https）。**填了这一项就自动用中继模式**：插件主动连到服务器，家里不用开入站端口，云端 MCP 配置的 URL 就是这个地址加 `/mcp`。留空则按 tunnel/publicUrl。"
         },
         "cursorCloudBridge.tunnel": {
           "type": "string",
-          "enum": ["none", "cloudflared"],
+          "enum": ["none", "cloudflared", "relay"],
           "default": "none",
-          "description": "none 表示自己开隧道并填 publicUrl；cloudflared 表示启动时顺带运行 cloudflared 快速隧道（需已安装 cloudflared）。"
+          "description": "none 表示自己开隧道并填 publicUrl；cloudflared 表示启动时顺带运行 cloudflared 快速隧道（需已安装 cloudflared）；relay 表示连到 relayUrl 指定的公网中继（只填 relayUrl 也会自动进入中继模式）。"
         },
         "cursorCloudBridge.waitSeconds": {
           "type": "number",

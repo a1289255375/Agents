@@ -205,8 +205,9 @@ function renderSessions() {
 
 function publicState() {
   const { tunnel, selfTest } = bridge;
-  if (tunnel?.state === "starting") return ["隧道启动中", "connecting"];
-  if (tunnel?.state === "down") return ["隧道已断开", "error"];
+  const relay = tunnel?.kind === "relay";
+  if (tunnel?.state === "starting" || tunnel?.state === "connecting") return [relay ? "连接中继中" : "隧道启动中", "connecting"];
+  if (tunnel?.state === "down") return [relay ? "中继链路断开" : "隧道已断开", "error"];
   if (!bridge.publicUrl) return ["未填写公网地址", "warn"];
   if (!selfTest) return ["已填写，正在自检", "offline"];
   return selfTest.ok ? ["公网地址可用", "ok"] : ["自检未通过", "warn"];
@@ -603,11 +604,18 @@ function renderConnection() {
   const tunnelState = byId("tunnel-state");
   tunnelState.hidden = !tunnel;
   if (tunnel) {
-    tunnelState.textContent = {
-      starting: "cloudflared 隧道启动中……",
-      up: `cloudflared 快速隧道已建立：${tunnel.url}。这个地址每次启动都会变，变了要同步修改云端 MCP 配置里的 URL。`,
-      down: `隧道已断开：${tunnel.error}`,
-    }[tunnel.state];
+    tunnelState.textContent = tunnel.kind === "relay"
+      ? {
+        starting: `正在连接公网中继 ${tunnel.url} ……`,
+        connecting: `正在连接公网中继 ${tunnel.url} ……`,
+        up: `已连到公网中继：${tunnel.url}。云端 MCP 配置的 URL 固定填 ${tunnel.url}/mcp。`,
+        down: `中继链路断开，正在自动重连……${tunnel.error ? `（${tunnel.error}）` : ""}`,
+      }[tunnel.state]
+      : {
+        starting: "cloudflared 隧道启动中……",
+        up: `cloudflared 快速隧道已建立：${tunnel.url}。这个地址每次启动都会变，变了要同步修改云端 MCP 配置里的 URL。`,
+        down: `隧道已断开：${tunnel.error}`,
+      }[tunnel.state];
   }
   const observed = byId("observed");
   observed.hidden = !observedUrl || observedUrl === bridge.publicUrl;

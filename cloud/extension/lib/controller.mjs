@@ -30,6 +30,7 @@ export function createController({ vscode, bridgeApi, context, stateDir = nodePa
       mcpPort: config.get("mcpPort"),
       publicUrl: config.get("publicUrl") ?? "",
       tunnel: config.get("tunnel") ?? "none",
+      relayUrl: config.get("relayUrl") ?? "",
       waitSeconds: config.get("waitSeconds"),
       shellWaitSeconds: config.get("shellWaitSeconds"),
       autoStart: config.get("autoStart") ?? true,
@@ -81,9 +82,12 @@ export function createController({ vscode, bridgeApi, context, stateDir = nodePa
       const { token } = await bridgeApi.resolveToken(state);
       const encodings = await bridgeApi.detectEncodings();
       const current = settings();
-      // Setting wins; otherwise reuse the address the console last saved, as the standalone CLI does.
-      const publicUrl = current.tunnel === "cloudflared" ? "" : (String(current.publicUrl ?? "").trim() || state.get().publicUrl || "");
-      const params = bridgeParams({ root, token, settings: { ...current, publicUrl }, encodings });
+      // The setting wins; otherwise reuse the address the console last saved, as the standalone CLI
+      // does. In relay or cloudflared mode bridgeParams ignores the saved address on its own.
+      const params = bridgeParams({
+        root, token, settings: current, encodings,
+        savedPublicUrl: state.get().publicUrl, normalizeRelayUrl: bridgeApi.normalizeRelayUrl,
+      });
       running = await bridgeApi.startBridge({
         ...params,
         rememberPublicUrl: (url) => state.save({ publicUrl: url }),

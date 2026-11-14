@@ -29,6 +29,7 @@ test("bridgeParams maps settings to startBridge arguments", () => {
     consoleEncoding: "cp866",
     publicUrl: "https://x.example/mcp/",
     tunnel: undefined,
+    relayUrl: undefined,
   });
 });
 
@@ -43,6 +44,37 @@ test("bridgeParams uses defaults and drops publicUrl when a tunnel runs", () => 
   assert.equal(params.consoleEncoding, "gbk");
   assert.equal(params.tunnel, "cloudflared");
   assert.equal(params.publicUrl, undefined);
+  assert.equal(params.relayUrl, undefined);
+});
+
+test("bridgeParams switches to relay mode when only a server address is filled", () => {
+  const params = bridgeParams({
+    root: "/p", token: "t",
+    settings: { relayUrl: " 1.2.3.4 ", publicUrl: "https://ignored.example", tunnel: "none" },
+    savedPublicUrl: "https://saved.example",
+    normalizeRelayUrl: (value) => `https://${value.trim()}`,
+  });
+  assert.equal(params.relayUrl, "https://1.2.3.4");
+  assert.equal(params.tunnel, undefined);
+  assert.equal(params.publicUrl, undefined);
+});
+
+test("bridgeParams treats tunnel=relay the same and requires an address", () => {
+  const params = bridgeParams({ root: "/p", token: "t", settings: { tunnel: "relay", relayUrl: "relay.example.com" }, normalizeRelayUrl: (v) => `https://${v}` });
+  assert.equal(params.relayUrl, "https://relay.example.com");
+  assert.throws(() => bridgeParams({ root: "/p", token: "t", settings: { tunnel: "relay", relayUrl: "  " } }), /中继模式需要/);
+});
+
+test("bridgeParams: an explicit cloudflared tunnel beats a leftover relay address", () => {
+  const params = bridgeParams({ root: "/p", token: "t", settings: { tunnel: "cloudflared", relayUrl: "1.2.3.4" } });
+  assert.equal(params.tunnel, "cloudflared");
+  assert.equal(params.relayUrl, undefined);
+});
+
+test("bridgeParams falls back to the saved public address only when nothing overrides it", () => {
+  assert.equal(bridgeParams({ root: "/p", token: "t", settings: {}, savedPublicUrl: "https://saved.example" }).publicUrl, "https://saved.example");
+  assert.equal(bridgeParams({ root: "/p", token: "t", settings: { publicUrl: "https://set.example" }, savedPublicUrl: "https://saved.example" }).publicUrl, "https://set.example");
+  assert.equal(bridgeParams({ root: "/p", token: "t", settings: { relayUrl: "1.2.3.4" }, savedPublicUrl: "https://saved.example", normalizeRelayUrl: (v) => `https://${v}` }).publicUrl, undefined);
 });
 
 test("bridgeParams rejects bad settings with a readable message", () => {

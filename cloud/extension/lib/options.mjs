@@ -30,13 +30,20 @@ function seconds(value, fallback, min, max, name) {
 
 // startBridge arguments assembled from settings, the resolved root, the token and the detected
 // encodings. Throws OptionError on a setting the user got wrong, so the caller can show it as-is.
-export function bridgeParams({ root, token, settings = {}, encodings = {} }) {
+// A relay server address is the public address, so filling it alone switches on relay mode; the
+// explicit cloudflared tunnel still wins. normalizeRelayUrl is injected (the real one lives in the
+// bridge's config.mjs, which this file stays decoupled from) so a bare host can default to https.
+export function bridgeParams({ root, token, settings = {}, encodings = {}, savedPublicUrl, normalizeRelayUrl = (value) => value }) {
   if (!trim(root)) throw new OptionError("还没有设置工作区目录");
   if (!token) throw new OptionError("缺少访问令牌");
   const policy = settings.commandPolicy ?? "ask";
   if (!["ask", "allow", "deny"].includes(policy)) throw new OptionError(`命令执行策略必须是 ask、allow 或 deny，收到：${policy}`);
-  const tunnel = settings.tunnel === "cloudflared" ? "cloudflared" : undefined;
-  const publicUrl = tunnel ? undefined : trim(settings.publicUrl) || undefined;
+  const relaySet = trim(settings.relayUrl);
+  const useRelay = settings.tunnel === "relay" || (settings.tunnel !== "cloudflared" && Boolean(relaySet));
+  if (useRelay && !relaySet) throw new OptionError("中继模式需要在设置 cursorCloudBridge.relayUrl 里填写公网服务器地址");
+  const relayUrl = useRelay ? normalizeRelayUrl(relaySet) : undefined;
+  const tunnel = useRelay ? undefined : settings.tunnel === "cloudflared" ? "cloudflared" : undefined;
+  const publicUrl = useRelay || tunnel ? undefined : trim(settings.publicUrl) || trim(savedPublicUrl) || undefined;
   return {
     root: trim(root),
     token,
@@ -49,11 +56,12 @@ export function bridgeParams({ root, token, settings = {}, encodings = {} }) {
     consoleEncoding: encodings.consoleEncoding ?? encodings.legacyEncoding ?? "gbk",
     publicUrl,
     tunnel,
+    relayUrl,
   };
 }
 
 // The settings that force the bridge to restart when they change. The policy is applied live through
 // the console API instead, so it is left off this list.
 export const restartKeys = [
-  "workspaceRoot", "consolePort", "mcpPort", "publicUrl", "tunnel", "waitSeconds", "shellWaitSeconds",
+  "workspaceRoot", "consolePort", "mcpPort", "publicUrl", "tunnel", "relayUrl", "waitSeconds", "shellWaitSeconds",
 ];
