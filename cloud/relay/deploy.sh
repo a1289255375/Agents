@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # Idempotent deploy of the Cursor bridge relay onto a public Linux server. Re-runnable: it installs
-# Node 22, the relay code, a Let's Encrypt certificate for the server's bare IP (via lego, HTTP-01 on
-# port 80, the short-lived IP-certificate profile), a systemd service that runs the relay on port 443
-# as an unprivileged user, and a daily renewal timer. It never writes any secret; the bridge token is
-# only ever held by the plugin on the user's own machine.
+# Node 22, the relay code, a systemd service that runs the relay as an unprivileged user, and (in TLS
+# mode) a Let's Encrypt certificate for the server's bare IP via lego plus a daily renewal timer. It
+# never writes any secret; the bridge token is only ever held by the plugin on the user's own machine.
+#
+# Two modes:
+#   TLS (default): a trusted bare-IP cert via HTTP-01 on port 80, relay on port 443. Needs inbound 80
+#     and 443 reachable from the internet. On Chinese networks these are usually blocked for an
+#     unregistered (未备案) IP, so this mode only works after ICP 备案 opens 80/443.
+#   --insecure-http: no certificate, relay serves plain HTTP on --port. Works on a high port when
+#     80/443 are blocked, but the bearer token and all traffic travel UNENCRYPTED. See README.
 #
 # Usage (run as root on the server, with cloud/src and cloud/relay present beside it):
-#   ./deploy.sh --ip <public-ip> [--email you@example.com] [--port 443]
+#   ./deploy.sh --ip <public-ip> [--email you@example.com]                 # TLS on 443
+#   ./deploy.sh --ip <public-ip> --insecure-http --port 18443             # plain HTTP on a high port
 #
 # Pre-placed binaries (for a server without outbound access) are honoured:
 #   NODE_TARBALL=/path/node-v22.x-linux-x64.tar.xz LEGO_TARBALL=/path/lego_vX_linux_amd64.tar.gz ./deploy.sh ...
@@ -14,9 +21,10 @@ set -euo pipefail
 
 NODE_VERSION="${NODE_VERSION:-22.11.0}"
 LEGO_VERSION="${LEGO_VERSION:-4.19.2}"
-PORT=443
+PORT=""
 EMAIL=""
 IP=""
+INSECURE=0
 MAX_LINKS="${RELAY_MAX_LINKS:-16}"
 
 PREFIX=/opt/cursor-bridge-relay
@@ -33,14 +41,17 @@ while [ $# -gt 0 ]; do
     --ip) IP="$2"; shift 2;;
     --email) EMAIL="$2"; shift 2;;
     --port) PORT="$2"; shift 2;;
+    --insecure-http) INSECURE=1; shift;;
     --node-version) NODE_VERSION="$2"; shift 2;;
     *) die "未知参数：$1";;
   esac
 done
 
 [ "$(id -u)" = "0" ] || die "请用 root 运行"
-[ -n "$IP" ] || die "必须用 --ip 指定服务器公网 IP（证书就是为这个裸 IP 申请的）"
+[ -n "$IP" ] || die "必须用 --ip 指定服务器公网 IP"
+[ -n "$PORT" ] || PORT=$([ "$INSECURE" = "1" ] && echo 18443 || echo 443)
 [ -n "$EMAIL" ] || EMAIL="cursor-bridge-relay@example.com" # LE 不校验，仅作联系邮箱占位，可用 --email 覆盖
+SCHEME=$([ "$INSECURE" = "1" ] && echo http || echo https)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR/../src"
@@ -131,13 +142,16 @@ obtain_cert() {
 }
 
 write_units() {
-  cat > "$ETC/relay.env" <<EOF
-RELAY_PORT=$PORT
-RELAY_HOST=0.0.0.0
-RELAY_CERT=$LIVE_DIR/fullchain.pem
-RELAY_KEY=$LIVE_DIR/privkey.pem
-RELAY_MAX_LINKS=$MAX_LINKS
-EOF
+  install -d -m 0755 "$ETC"
+  {
+    echo "RELAY_PORT=$PORT"
+    echo "RELAY_HOST=0.0.0.0"
+    echo "RELAY_MAX_LINKS=$MAX_LINKS"
+    if [ "$INSECURE" = "0" ]; then
+      echo "RELAY_CERT=$LIVE_DIR/fullchain.pem"
+      echo "RELAY_KEY=$LIVE_DIR/privkey.pem"
+    fi
+  } > "$ETC/relay.env"
   cat > /etc/systemd/system/cursor-bridge-relay.service <<EOF
 [Unit]
 Description=Cursor bridge relay
@@ -161,6 +175,7 @@ RestartSec=2
 [Install]
 WantedBy=multi-user.target
 EOF
+  [ "$INSECURE" = "0" ] || return 0
   # Renewal: a daily timer runs lego renew; the hook refreshes live/ and the relay reloads in place.
   cat > /etc/systemd/system/cursor-bridge-relay-renew.service <<EOF
 [Unit]
@@ -185,41 +200,44 @@ EOF
 }
 
 open_firewall() {
+  local ports="$PORT"
+  [ "$INSECURE" = "0" ] && ports="80 $PORT" # TLS mode also needs 80 for the ACME challenge
   if command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state >/dev/null 2>&1; then
-    say "firewalld：放行 80 与 $PORT"
-    firewall-cmd --permanent --add-port=80/tcp >/dev/null
-    firewall-cmd --permanent --add-port="$PORT"/tcp >/dev/null
+    say "firewalld：放行 $ports"
+    for p in $ports; do firewall-cmd --permanent --add-port="$p"/tcp >/dev/null; done
     firewall-cmd --reload >/dev/null
   elif command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-    say "ufw：放行 80 与 $PORT"
-    ufw allow 80/tcp >/dev/null
-    ufw allow "$PORT"/tcp >/dev/null
+    say "ufw：放行 $ports"
+    for p in $ports; do ufw allow "$p"/tcp >/dev/null; done
   else
-    say "未检测到启用的本机防火墙，跳过（云平台安全组需另在控制台放行入站 80 与 $PORT）"
+    say "未检测到启用的本机防火墙，跳过（云平台安全组需另在控制台放行入站 $ports）"
   fi
 }
 
 install_node
-install_lego
 copy_code
 ensure_user
-write_install_cert
-obtain_cert
+if [ "$INSECURE" = "0" ]; then
+  install_lego
+  write_install_cert
+  obtain_cert
+fi
 write_units
 open_firewall
 
 say "启用并启动服务"
 systemctl daemon-reload
 systemctl enable --now cursor-bridge-relay.service
-systemctl enable --now cursor-bridge-relay-renew.timer
+[ "$INSECURE" = "0" ] && systemctl enable --now cursor-bridge-relay-renew.timer
 sleep 1
 systemctl --no-pager --full status cursor-bridge-relay.service | sed -n '1,8p' || true
 
+ADDR="$SCHEME://$IP:$PORT"
 cat <<EOF
 
-完成。中继已在 https://$IP:$PORT 上监听。
-  • 健康检查（本机）：curl -sS https://$IP:$PORT/__relay_health__
-  • 插件里把“服务器地址”填 $IP（或 https://$IP），云端 MCP 的 URL 用 https://$IP/mcp
+完成。中继已在 $ADDR 上监听（$([ "$INSECURE" = "1" ] && echo "明文 HTTP，令牌与流量未加密" || echo "TLS")）。
+  • 健康检查（本机）：curl -sS $ADDR/__relay_health__
+  • 插件里把“服务器地址”填 $ADDR，云端 MCP 的 URL 用 $ADDR/mcp
   • 服务：systemctl status cursor-bridge-relay ；日志：journalctl -u cursor-bridge-relay -f
-  • 续期：systemctl list-timers cursor-bridge-relay-renew
 EOF
+[ "$INSECURE" = "1" ] && echo "  • 注意：这是明文 HTTP。Bearer 令牌和所有 MCP 流量都未加密，详见 README 的安全说明。"
