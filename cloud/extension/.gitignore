@@ -1,0 +1,7 @@
+# Staged copies and build artifacts produced by build.mjs; the sources live in ../src, ../web, ../prompt.md.
+/src/
+/web/
+/prompt.md
+/node_modules/
+/package-lock.json
+*.vsix
