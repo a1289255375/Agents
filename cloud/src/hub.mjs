@@ -43,7 +43,7 @@ export function createHub({ now = Date.now } = {}) {
   function create(id, name, note) {
     const session = {
       id, name: name || `云端会话 ${++sessionCount}`, createdAt: now(), lastSeenAt: now(),
-      seq: 0, delivered: 0, acked: 0, inbox: [], timeline: [], items: 0, replacedLoops: new Set(),
+      seq: 0, delivered: 0, acked: 0, inbox: [], timeline: [], items: 0,
     };
     sessions.set(id, session);
     addToTimeline(session, "note", note);
@@ -93,7 +93,7 @@ export function createHub({ now = Date.now } = {}) {
       id, name, key, meta, createdAt, lastSeenAt, hint, closed, delivered, acked,
       status: statusOf(session),
       queued: session.inbox.filter((message) => message.seq > session.delivered).length,
-      waiting: wait && { via: wait.via, since: wait.startedAt, holdMs: wait.holdMs },
+      waiting: wait && { since: wait.startedAt, holdMs: wait.holdMs },
       preview: last?.text.slice(0, 80),
     };
   }
@@ -125,19 +125,14 @@ export function createHub({ now = Date.now } = {}) {
     },
 
     // Resolves with the next message, or with idle / superseded / aborted / disconnected. Only the
-    // newest wait of a session is live. `loop` names the polling loop a shell wait belongs to: its
-    // polls are one wait, so a loop the agent has moved on from cannot take the wait back.
-    wait(id, { signal, holdMs, via, loop }) {
-      if (loop && sessions.get(id)?.replacedLoops.has(loop)) return { event: "superseded" };
+    // newest wait of a session is live.
+    wait(id, { signal, holdMs }) {
       const session = forAgent(id);
       if (!session) return { event: "disconnected" };
       if (signal?.aborted) return { event: "aborted" };
-      if (session.loop && session.loop !== loop) session.replacedLoops.add(session.loop);
-      session.loop = loop;
       if (session.waiter) {
-        // An MCP client that gave up on its call without closing it. A shell poll in this place
-        // is a loop the agent left running, which says nothing about cut-offs.
-        if (session.waiter.via === "mcp") cutOff(session, session.waiter);
+        // An MCP client that gave up on its call without closing it.
+        cutOff(session, session.waiter);
         session.waiter.finish({ event: "superseded" });
       }
       if (session.inbox.length) {
@@ -145,7 +140,7 @@ export function createHub({ now = Date.now } = {}) {
         return deliver(session, session.inbox[0]);
       }
       return new Promise((resolve) => {
-        const waiter = { via, holdMs, startedAt: now() };
+        const waiter = { holdMs, startedAt: now() };
         const timer = setTimeout(() => {
           // A wait that ran its full length shows the earlier cut-off is no longer happening.
           session.hint = undefined;
@@ -153,8 +148,7 @@ export function createHub({ now = Date.now } = {}) {
           waiter.finish({ event: "idle" });
         }, holdMs);
         const abort = () => {
-          // A shell poll also ends this way when the agent's shell tool stops the command.
-          if (via === "mcp") cutOff(session, waiter);
+          cutOff(session, waiter);
           waiter.finish({ event: "aborted" });
         };
         waiter.finish = (result) => {

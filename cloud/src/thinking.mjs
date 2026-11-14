@@ -45,7 +45,7 @@ export function createThinkingRelay({ hub, apiKey, apiBase = "https://api.cursor
   }
 
   return {
-    // Called on every shell wait that names the agent; only the first call for a session opens the stream.
+    // Called on every connect_session that names the agent; only the first call for a session opens the stream.
     follow(session, agent) {
       if (followed.get(session) === agent) return;
       followed.set(session, agent);

@@ -1,70 +1,32 @@
-// MCP tools for the cloud agent: the session loop (connect / wait / reply) and the project tools
+// MCP tools for the cloud agent: the session tools (connect / wait / reply) and the project tools
 // that act on the user's local machine.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { waitTicket } from "./auth.mjs";
 import { sessionIdPattern } from "./hub.mjs";
 import { describeError } from "./project/files.mjs";
 import { legacyEncodings } from "./project/text.mjs";
 
 const heartbeatMs = 15_000;
-const taskInstruction = "message 是用户交给你的任务。用本服务的项目工具（read_file、edit_file、write_file、search_text、run_command、run_program、run_tests 等）在用户的本地电脑上完成它，调用时带上 session 参数（当前会话 id）。耗时较长时用 report_progress 汇报进展。完成后调用 reply_message 发送结果，然后立即执行它返回的 nextCall 继续等待。不要结束当前这一轮。";
-const redeliveredInstruction = "这条消息之前已经投递过，但一直没有收到 reply_message。如果你已经处理过它，直接调用 reply_message 补发结果，不要重复执行；否则现在处理。";
-const idleInstruction = "暂时没有新消息，这不是错误。立即再次执行 nextCall 继续等待；不要输出说明，不要结束当前这一轮。";
-const shellIdleInstruction = "暂时没有新消息，这不是错误。原样重新执行同一条等待命令继续等待（不行就调用 nextCall）；不要输出说明，不要结束当前这一轮。";
-const disconnectedInstruction = "用户已经明确结束这个会话。停止等待，不要再调用 wait_message；这是唯一可以结束当前这一轮的情况。";
-const supersededInstruction = "这次等待已被同一会话更新的一次等待取代，不需要处理，也不要为它再发起等待。";
 
-const nextWait = (id) => ({ name: "wait_message", arguments: { id } });
 const duration = (ms) => (ms >= 120_000 ? `${Math.round(ms / 60_000)} 分钟` : `${Math.round(ms / 1000)} 秒`);
 
-// What a finished wait tells the agent. The wait_message tool and the shell-wait endpoint both use
-// it, so the two ways of waiting speak the same protocol. `link` says whether the user's side of a
-// relay is connected; an idle wait passes it on so the agent can tell "no task yet" from "nobody there yet".
-export function waitResult(id, result, via = "mcp", link = undefined) {
+// Tool results carry data only; what the agent does with them is up to the prompt (prompt.md).
+// `link` says whether the user's side of a relay is connected, so an idle wait can tell
+// "no task yet" from "nobody there yet".
+function waitResult(id, result, link) {
   if (result.event === "message") {
     const { redelivered, ...message } = result;
-    return { ...message, id, ...(redelivered && { redelivered }), instruction: redelivered ? redeliveredInstruction : taskInstruction };
+    return { ...message, id, ...(redelivered && { redelivered }) };
   }
-  if (result.event === "idle") {
-    return { event: "idle", id, ...(link && { plugin: link }), instruction: via === "shell" ? shellIdleInstruction : idleInstruction, nextCall: nextWait(id) };
-  }
-  if (result.event === "disconnected") return { event: "disconnected", id, instruction: disconnectedInstruction };
-  return { event: result.event, id, instruction: supersededInstruction };
+  return { event: result.event, id, ...(result.event === "idle" && link && { plugin: link }) };
 }
 
-export function createMcpServer({ hub, project, config, waitUrl }) {
+export function createMcpServer({ hub, project, config, thinking }) {
   const server = new McpServer({ name: "cursor-cloud-bridge", version: "1.0.0" }, {
-    instructions: "这是通往用户本地电脑的项目桥。先调用 connect_session({}) 报到，再按返回的 nextCall 挂起等待用户下发的任务；项目工具直接读写用户本地项目里的文件、执行命令、运行程序和测试。每条任务回复后立刻继续等待，不要结束当前这一轮。",
+    instructions: "这是通往用户本地电脑的项目桥：会话工具接收用户在本地网页控制台下发的任务并回传结果，项目工具直接读写用户本地项目里的文件、执行命令、运行程序和测试。",
   });
   const { files, search, commands } = project;
   const link = () => config.link?.();
-
-  // The same wait as wait_message, run in the agent's own shell tool. One shell call can block for
-  // many minutes, so an idle hour costs a few model calls, not dozens. The command is a loop of
-  // short polls, not one long request: every poll is over before a tunnel can buffer or drop it.
-  // Three failed polls in a row end the loop, so an unreachable address sends the agent back to
-  // wait_message within seconds instead of leaving it deaf until the deadline. Each run of the
-  // command names itself (shell pid and deadline), so the hub can tell its polls from a later run's.
-  // A cloud agent's shell has its agent id in CURSOR_CONVERSATION_ID; the polls pass it on so the
-  // bridge can read the agent's thinking from Cursor (thinking.mjs).
-  // The agent copies the command out of a JSON string, so everything before the final printf avoids
-  // double quotes and backslashes: the case patterns match the quotes of {"event":"idle" with `?`.
-  function shellWait(id, explain) {
-    const url = config.shellWaitMs && waitUrl(id);
-    // The address comes from request headers or user input and ends up inside a shell command.
-    if (!url || !/^[\w.~:/[\]%-]+$/.test(url)) return undefined;
-    const poll = `curl -sS -m ${Math.ceil(config.waitMs / 1000) + 30} -H 'Authorization: Bearer ${waitTicket(config.token, id)}' '${url}?loop='$$-$end'&agent='$CURSOR_CONVERSATION_ID 2>&1`;
-    return {
-      command: `end=$(($(date +%s)+${Math.ceil(config.shellWaitMs / 1000)})); n=0; while :; do r=$(${poll}); `
-        + `case $r in '{'?event?:?idle?*) n=0;; '{'?event?:?*) break;; *) n=$((n+1)); [ $n -ge 3 ] && break; sleep 5;; esac; `
-        + `[ $(date +%s) -ge $end ] && break; done; printf '%s\\n' "$r" | tail -n 1`,
-      blockMs: config.shellWaitMs + config.waitMs + 60_000,
-      ...(explain && {
-        instruction: `更省调用的等待方式：用你的 Shell/终端工具在前台原样执行 command（不要改写，不要放进后台或 tmux），并把该工具的阻塞（超时）时间设为不小于 blockMs 毫秒。它会一直挂起，直到网页有新消息或 ${duration(config.shellWaitMs)}到时，然后输出一行与 wait_message 相同的 JSON；event=idle 时原样重新执行同一条命令。输出不是这种 JSON（命令报错、被切断或被转到后台）时，改为调用 nextCall（wait_message），之后也一直用 nextCall。`,
-      }),
-    };
-  }
 
   const asText = (text) => ({ content: [{ type: "text", text }] });
   const asError = (text) => ({ isError: true, content: [{ type: "text", text }] });
@@ -105,32 +67,26 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
 
   sessionTool(
     "connect_session",
-    "报到：告诉用户“我已经创建好了”，成为一个可以接收指令的会话。创建完毕后第一件事就调用它。调用 connect_session({}) 会立即返回 event=bind 和 nextCall；随后立刻执行 nextCall 挂起等待用户的指令。断线或服务重启后，可以带上原来的 id 或 key 重新接入同一个会话。",
+    "接入用户的本地网页控制台，成为一个可以接收用户指令的会话。立即返回 event=bind、会话 id 和本地项目的环境说明。带上原来的 id 或 key 可以重新接入同一个会话。",
     {
       name: z.string().trim().min(1).max(60).optional().describe("显示给用户的会话名称，可不填"),
       id: idArg.optional().describe("要重新接入的原会话 id；新会话不填"),
       key: z.string().trim().min(1).max(200).optional().describe("调用方的固定标识，例如对话 id。带同一个 key 再次调用会回到同一个会话，即使已经不记得会话 id"),
       meta: z.record(z.string().max(40), z.string().max(300)).optional().describe("显示在会话旁的附加信息，例如对话 id、所在主机"),
+      agent: z.string().regex(/^bc-[\w-]{1,80}$/, "agent 应为 Cloud Agent 的 id，形如 bc-…").optional()
+        .describe("这个 Cloud Agent 的 id（环境变量 CURSOR_CONVERSATION_ID 的值，形如 bc-…）。用户的控制台据此显示你的思考；读不到就不填"),
     },
-    ({ id, name, key, meta }) => {
+    ({ id, name, key, meta, agent }) => {
       const session = hub.connect({ id, name, key, meta });
+      if (agent) thinking?.follow(session.id, agent);
       const plugin = link();
-      return {
-        event: "bind",
-        id: session.id,
-        name: session.name,
-        ...(plugin && { plugin }),
-        project: project.info(),
-        instruction: "已接入。立即执行 nextCall 挂起等待用户的指令；之后所有项目工具调用都带上 session 参数（即这里的 id）。",
-        nextCall: nextWait(session.id),
-        shellWait: shellWait(session.id, true),
-      };
+      return { event: "bind", id: session.id, name: session.name, ...(plugin && { plugin }), project: project.info() };
     },
   );
 
   sessionTool(
     "wait_message",
-`挂起等待用户的下一条指令，最长约 ${duration(config.waitMs)}。event=message：message 是用户交给你的任务，完成后调用 reply_message。event=idle：暂时没有消息（不是错误），立即再次调用 wait_message，无论重复多少次。event=disconnected：用户已明确结束会话，停止等待。`,
+    `挂起等待用户的下一条指令，最长约 ${duration(config.waitMs)}。返回 event=message（message 是用户的指令；redelivered=true 表示它之前投递过，但还没有收到对应的 reply_message）、event=idle（这段时间没有新消息）、event=superseded（同一会话有更新的一次等待）或 event=disconnected（用户已结束会话）。`,
     { id: idArg },
     async ({ id }, { signal, _meta, sendNotification }) => {
       const progressToken = _meta?.progressToken;
@@ -140,7 +96,7 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
         void sendNotification({ method: "notifications/progress", params: { progressToken, progress: ++progress } }).catch(() => {});
       }, heartbeatMs);
       try {
-        return waitResult(id, await hub.wait(id, { signal, holdMs: config.waitMs, via: "mcp" }), "mcp", link());
+        return waitResult(id, await hub.wait(id, { signal, holdMs: config.waitMs }), link());
       } finally {
         clearInterval(heartbeat);
       }
@@ -149,7 +105,7 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
 
   sessionTool(
     "reply_message",
-    "把任务结果或对用户问题的答复发给用户。随后立刻执行返回的 nextCall 继续等待下一条消息。",
+    "把任务结果或对用户问题的答复发给用户。返回的 queued 是还在排队、尚未领取的消息数。",
     {
       id: idArg,
       text: z.string().trim().min(1).max(100000).describe("发给用户的内容，支持 Markdown"),
@@ -157,35 +113,24 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
     ({ id, text }) => {
       const result = hub.reply(id, text);
       if (result.event === "disconnected") return waitResult(id, result);
-      const viaShell = shellWait(id, false);
-      return {
-        event: "replied",
-        id,
-        sent: true,
-        queued: result.queued,
-        instruction: result.queued ? `还有 ${result.queued} 条消息在排队。立刻执行 nextCall 领取下一条。`
-          : viaShell ? "现在立刻继续等待，方式和你上一次等待相同：在 Shell 工具里执行 shellWait.command，或执行 nextCall。"
-            : "现在立刻执行 nextCall 继续等待。",
-        nextCall: nextWait(id),
-        shellWait: viaShell,
-      };
+      return { event: "replied", id, sent: true, queued: result.queued };
     },
   );
 
   sessionTool(
     "report_progress",
-    "任务耗时较长时，把当前进展发给用户看。它不结束任务，也不需要等待回复。",
+    "任务耗时较长时，把当前进展发给用户看。它不结束任务，也不需要等待回复。返回的 queued 是用户在此期间又发来、尚未领取的消息数。",
     { id: idArg, text: z.string().trim().min(1).max(20000).describe("进展说明") },
     ({ id, text }) => {
       const result = hub.progress(id, text);
       if (result.event === "disconnected") return waitResult(id, result);
-      return { event: "progress", id, sent: true, ...(result.queued && { note: `用户又发来 ${result.queued} 条消息，当前任务回复后会在 wait_message 收到。` }) };
+      return { event: "progress", id, sent: true, queued: result.queued };
     },
   );
 
   sessionTool(
     "disconnect_session",
-    "结束这个会话的等待。只在用户明确要求结束时调用。",
+    "结束这个会话。之后对这个会话的 wait_message 返回 event=disconnected。",
     { id: idArg },
     ({ id }) => {
       hub.disconnect(id, "agent");
@@ -304,7 +249,7 @@ export function createMcpServer({ hub, project, config, waitUrl }) {
   // Before the user's side of a relay has connected, the shells of that machine are not known yet.
   const shellNames = Object.keys(commands.shells);
   const defaultShell = commands.defaultShell ? `${commands.defaultShell}（${commands.shells[commands.defaultShell]}）` : "由用户的电脑决定（用 project_info 查看）";
-  const jobRules = `一次调用最多等待约 ${commandWaitSeconds} 秒：到时还没结束，就返回已有输出和编号，再用 command_status 继续等待。命令策略是“每次确认”时，要先由用户在本地批准，期间按返回的提示调用 command_status。结束时返回退出码、按时间合并的输出、单独列出的 stderr 部分（stderr 为空就没有这一段）和运行期间的文件变更。标准输入是关闭的，不要运行需要键盘交互的程序。`;
+  const jobRules = `一次调用最多等待约 ${commandWaitSeconds} 秒：到时还没结束，就返回已有输出、编号和后续输出的 offset，之后用 command_status 查询。命令策略是“每次确认”时，要先由用户在本地批准，期间同样用 command_status 查询。结束时返回退出码、按时间合并的输出、单独列出的 stderr 部分（stderr 为空就没有这一段）和运行期间的文件变更。标准输入是关闭的，不要运行需要键盘交互的程序。`;
   const timeoutArg = (seconds) => z.number().int().min(1).max(86_400).default(seconds).describe(`超过这个时间就终止整个进程树，默认 ${seconds} 秒`);
 
   projectTool(

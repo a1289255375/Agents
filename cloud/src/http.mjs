@@ -5,10 +5,10 @@ import { createServer } from "node:http";
 import { setTimeout as sleep } from "node:timers/promises";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { hasBearer, waitTicket } from "./auth.mjs";
+import { hasBearer } from "./auth.mjs";
 import { ConfigError } from "./config.mjs";
 import { SessionError } from "./hub.mjs";
-import { createMcpServer, waitResult } from "./mcp.mjs";
+import { createMcpServer } from "./mcp.mjs";
 import { CommandError } from "./project/commands.mjs";
 
 const proxyHeaders = [
@@ -54,7 +54,7 @@ function addressOf(req) {
 }
 
 export async function startMcpEndpoint({ bridge, hub, project, thinking, port, host }) {
-  const config = { token: bridge.token, waitMs: bridge.waitMs, shellWaitMs: bridge.shellWaitMs, commandWaitMs: bridge.commandWaitMs };
+  const config = { waitMs: bridge.waitMs, commandWaitMs: bridge.commandWaitMs };
 
   function unauthorized(res) {
     bridge.unauthorized++;
@@ -71,9 +71,7 @@ export async function startMcpEndpoint({ bridge, hub, project, thinking, port, h
       bridge.observedUrl = address.base;
       hub.notify();
     }
-    // The shell wait needs an address the agent's machine can reach: the configured one if there is one.
-    const base = bridge.publicUrl ?? address.base;
-    const server = createMcpServer({ hub, project, config, waitUrl: (id) => base && `${base}/wait/${id}` });
+    const server = createMcpServer({ hub, project, config, thinking });
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
     res.once("close", () => { void server.close(); });
     try {
@@ -84,20 +82,9 @@ export async function startMcpEndpoint({ bridge, hub, project, thinking, port, h
     }
   }
 
-  // The same wait as wait_message for agents that poll with `curl` in a loop inside their shell tool.
-  // Each request stays as short as an MCP wait: tunnels buffer a response until it is complete and
-  // lose it when it stays open for many minutes, so one long streaming response does not work.
-  // `agent` is the Cloud Agent id the command reads from the agent's own shell environment.
-  async function handleShellWait(res, id, loop, agent) {
-    const waiting = hub.wait(id, { signal: closedSignal(res), holdMs: bridge.waitMs, via: "shell", loop });
-    if (agent) thinking?.follow(id, agent);
-    const result = await waiting;
-    if (!res.destroyed) json(res, 200, waitResult(id, result, "shell"));
-  }
-
   const server = createServer(async (req, res) => {
     try {
-      const { pathname, searchParams } = new URL(req.url, "http://bridge.invalid");
+      const { pathname } = new URL(req.url, "http://bridge.invalid");
       if (pathname === "/" && req.method === "GET") {
         json(res, 200, { service: "cursor-cloud-bridge", instance: bridge.instance });
         return;
@@ -106,15 +93,6 @@ export async function startMcpEndpoint({ bridge, hub, project, thinking, port, h
         if (!hasBearer(req, bridge.token)) unauthorized(res);
         else if (req.method !== "POST") json(res, 405, { jsonrpc: "2.0", error: { code: -32000, message: "Method not allowed" }, id: null }, { Allow: "POST" });
         else await handleMcp(req, res);
-        return;
-      }
-      const wait = /^\/wait\/([0-9a-f]{8})$/.exec(pathname);
-      if (wait && req.method === "GET" && bridge.shellWaitMs) {
-        if (!hasBearer(req, waitTicket(bridge.token, wait[1]))) unauthorized(res);
-        else {
-          await handleShellWait(res, wait[1], /^[\w-]{1,40}$/.exec(searchParams.get("loop") ?? "")?.[0],
-            /^bc-[\w-]{1,80}$/.exec(searchParams.get("agent") ?? "")?.[0]);
-        }
         return;
       }
       json(res, 404, { error: "not found" });

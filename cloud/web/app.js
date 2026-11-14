@@ -306,7 +306,7 @@ function renderHeader() {
   const subtitle = byId("subtitle");
   subtitle.hidden = !entry;
   if (entry) {
-    const waiting = entry.waiting && `${entry.waiting.via === "shell" ? "Shell 等待" : "wait_message"} 挂起中，单次最长 ${Math.round(entry.waiting.holdMs / 1000)} 秒`;
+    const waiting = entry.waiting && `wait_message 挂起中，单次最长 ${Math.round(entry.waiting.holdMs / 1000)} 秒`;
     subtitle.textContent = [`会话 ${entry.id}`, waiting, entry.queued && `${entry.queued} 条消息排队中`].filter(Boolean).join(" · ");
   }
   if (entry) setStatus(status, statusLabels[entry.status], entry.status);

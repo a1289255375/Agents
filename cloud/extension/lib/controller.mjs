@@ -32,7 +32,6 @@ export function createController({ vscode, bridgeApi, context, stateDir = nodePa
       tunnel: config.get("tunnel") ?? "none",
       relayUrl: config.get("relayUrl") ?? "",
       waitSeconds: config.get("waitSeconds"),
-      shellWaitSeconds: config.get("shellWaitSeconds"),
       autoStart: config.get("autoStart") ?? true,
     };
   };

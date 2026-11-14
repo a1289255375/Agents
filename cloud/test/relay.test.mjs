@@ -83,17 +83,16 @@ test("GET / answers relay health without a token and forwards to the bridge with
   assert.deepEqual(forwarded, { service: "cursor-cloud-bridge", instance: "pc-1" });
 });
 
-test("routes a wt_-ticket /wait request to the sole link (not the token)", async (t) => {
-  const local = await startLocal(t, (req, res) => {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ path: req.url }));
-  });
+test("a request whose bearer matches no link is not forwarded, whatever the path", async (t) => {
+  const local = await startLocal(t, (req, res) => res.end("should not reach"));
   const relay = await startRelay(t);
   await startLink(t, { relayUrl: relay.url, localPort: local.port });
 
-  const res = await fetch(`${relay.url}/wait/abcd1234?loop=x`, { headers: { Authorization: "Bearer wt_notthetoken" } });
-  assert.equal(res.status, 200);
-  assert.deepEqual(await res.json(), { path: "/wait/abcd1234?loop=x" });
+  for (const path of ["/", "/wait/abcd1234"]) {
+    const res = await fetch(`${relay.url}${path}`, { headers: bearer("some-other-token") });
+    assert.equal(res.status, 503, path);
+    assert.deepEqual(await res.json(), { error: "no bridge connected" });
+  }
 });
 
 test("streams response chunks as the bridge produces them instead of buffering until the end", async (t) => {

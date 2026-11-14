@@ -144,7 +144,7 @@ export function createCommandRunner({
 
   function start(job) {
     if ([...jobs.values()].filter((other) => other.state === "running").length >= maxRunning) {
-      settle(job, "failed", { error: `同时运行的命令已达上限 ${maxRunning} 个，请先等待或用 stop_command 终止其中一些` });
+      settle(job, "failed", { error: `同时运行的命令已达上限 ${maxRunning} 个` });
       return;
     }
     Object.assign(job, { state: "running", startedAt: Date.now() });
@@ -251,15 +251,14 @@ export function createCommandRunner({
   function describe(job, offset) {
     const where = `${job.shell === directShell ? "直接启动" : job.shell}，目录 ${job.cwdRel}`;
     const end = job.dropped + job.output.length;
-    const ask = (args) => `command_status(${JSON.stringify({ jobId: job.id, ...args })})`;
     const headline = {
-      awaiting_approval: () => `等待用户在${approvalPlace}确认这条命令（命令策略：每次确认）。调用 ${ask()} 继续等待，不要重复发起同一条命令。`,
-      running: () => `仍在运行，已 ${seconds(Date.now() - job.startedAt)}（${where}）。调用 ${ask({ offset: end })} 继续等待和获取后续输出；不再需要时用 stop_command 终止。`,
+      awaiting_approval: () => `等待用户在${approvalPlace}确认这条命令（命令策略：每次确认）。`,
+      running: () => `仍在运行，已 ${seconds(Date.now() - job.startedAt)}（${where}），后续输出从 offset ${end} 开始。`,
       exited: () => `已结束，退出码 ${job.exitCode ?? `无（被信号 ${job.signal} 终止）`}，用时 ${seconds(job.endedAt - job.startedAt)}（${where}）`,
-      timeout: () => `超过 ${job.timeoutMs / 1000} 秒仍未结束，已终止整个进程树（${where}）。确实需要更久时用更大的 timeoutSeconds 重新执行。`,
+      timeout: () => `超过 ${job.timeoutMs / 1000} 秒仍未结束，已终止整个进程树（${where}）。`,
       stopped: () => "已被终止，进程树已结束。",
-      denied: () => "用户拒绝执行这条命令。不要重复请求同一条命令；换一种办法，或在回复里说明为什么需要它。",
-      expired: () => "等待确认期间云端超过 2 分钟没有继续查询，这条命令已作废，没有执行。仍然需要时重新调用 run_command。",
+      denied: () => "用户拒绝执行这条命令。",
+      expired: () => "等待确认期间云端超过 2 分钟没有继续查询，这条命令已作废，没有执行。",
       failed: () => `无法执行：${job.error}`,
     }[job.state]();
     if (!job.startedAt || job.state === "failed") return `[${job.id}] ${headline}`;
@@ -271,7 +270,7 @@ export function createCommandRunner({
     if (output.length > reportChars) {
       const tail = reportChars - reportHeadChars;
       const omitted = output.length - reportChars;
-      output = `${output.slice(0, reportHeadChars)}\n…[此处省略 ${omitted} 个字符，可用 ${ask({ offset: from + reportHeadChars })} 读取]…\n${output.slice(-tail)}`;
+      output = `${output.slice(0, reportHeadChars)}\n…[此处省略 ${omitted} 个字符，从 offset ${from + reportHeadChars} 开始]…\n${output.slice(-tail)}`;
     }
     const body = output || (offset > 0 ? "（没有新的输出）" : "（没有输出）");
     const tail = isFinal(job) ? annex(job) : [];
@@ -296,7 +295,7 @@ export function createCommandRunner({
     // without a shell). `tool` names the MCP tool the request came through, for the activity feed.
     async request({ command, argv, env, cwd = ".", shell = defaultShell, timeoutSeconds = 600, session, tool = "run_command" }) {
       if (policy === "deny") {
-        throw new CommandError("用户已禁用命令执行（命令策略：禁止）。只能使用文件工具；确实需要执行命令时，请在回复里告诉用户。");
+        throw new CommandError("用户已禁用命令执行（命令策略：禁止）。");
       }
       if (argv) {
         shell = directShell;

@@ -40,7 +40,7 @@ async function setup(t, overrides = {}) {
   const relayUrl = `http://127.0.0.1:${relayPort}`;
 
   const bridge = await startBridge({
-    root, token, port: 0, mcpPort: 0, policy: "allow", waitMs: 1500, shellWaitMs: 0,
+    root, token, port: 0, mcpPort: 0, policy: "allow", waitMs: 1500,
     legacyEncoding: "gbk", consoleEncoding: "gbk", relayUrl, ...overrides,
   });
   t.after(() => bridge.stop());
@@ -80,9 +80,9 @@ test("relay e2e: the agent drives the bridge entirely through the relay's /mcp",
   const bind = (await call("connect_session", { name: "中继演练" })).data;
   assert.equal(bind.event, "bind");
 
-  // Nothing queued yet: the held wait times out as idle and tells the agent to wait again.
+  // Nothing queued yet: the held wait times out as idle.
   const idle = (await call("wait_message", { id: bind.id })).data;
-  assert.equal(idle.event, "idle");
+  assert.deepEqual(idle, { event: "idle", id: bind.id });
 
   // A wait held open while the user types in the console; the held response carries the message back.
   const waiting = call("wait_message", { id: bind.id });
@@ -152,7 +152,7 @@ test("relay e2e: pasting the relay as a public URL alone explains that relayUrl 
   const relayUrl = `http://127.0.0.1:${relayPort}`;
 
   const bridge = await startBridge({
-    root, token, port: 0, mcpPort: 0, policy: "allow", waitMs: 1500, shellWaitMs: 0,
+    root, token, port: 0, mcpPort: 0, policy: "allow", waitMs: 1500,
     legacyEncoding: "gbk", consoleEncoding: "gbk", publicUrl: relayUrl,
   });
   t.after(() => bridge.stop());

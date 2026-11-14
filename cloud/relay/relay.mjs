@@ -2,8 +2,7 @@
 // A plugin dials in with an HTTP Upgrade to /__relay_link__, announcing sha256(token) in a header; the
 // relay remembers that one link in memory (never the token itself) and forwards every Cursor request
 // whose bearer hashes to the same value down the link's mux. `GET /` with no bearer answers the relay's
-// own health, so `curl https://<server>/` proves TLS without a token; the token-less self-test and the
-// wt_-ticket /wait path fall back to the sole link, which covers the one-plugin case this serves.
+// own health, so `curl https://<server>/` proves TLS without a token.
 import { createHash } from "node:crypto";
 import { createMux, pumpInto } from "../src/relay-mux.mjs";
 
@@ -62,17 +61,10 @@ export function createRelay({ maxLinks = 16, maxStreamsPerLink = 512, log = () =
     log(`link up (${hash.slice(0, 8)}…)，当前连接数 ${links.size}`);
   }
 
-  // Pick the link for a request: by bearer hash when it matches, otherwise the sole link for the
-  // token-less GET / self-test and the wt_-ticket /wait path.
-  function routeFor(req, pathname) {
+  const routeFor = (req) => {
     const bearer = bearerOf(req);
-    if (bearer) {
-      const link = links.get(sha256hex(bearer));
-      if (link) return link;
-    }
-    if (pathname !== "/mcp" && links.size === 1) return [...links.values()][0];
-    return undefined;
-  }
+    return bearer && links.get(sha256hex(bearer));
+  };
 
   function forward(link, req, res) {
     if (link.streams >= maxStreamsPerLink) return sendJson(res, 503, { error: "too many concurrent streams" });
@@ -98,7 +90,7 @@ export function createRelay({ maxLinks = 16, maxStreamsPerLink = 512, log = () =
     if (req.method === "GET" && (pathname === "/__relay_health__" || (pathname === "/" && !bearerOf(req)))) {
       return sendJson(res, 200, { service: "cursor-bridge-relay", ok: true, links: links.size });
     }
-    const link = routeFor(req, pathname);
+    const link = routeFor(req);
     if (!link) {
       if (pathname === "/mcp") return sendJson(res, 401, { jsonrpc: "2.0", error: { code: -32001, message: "Unauthorized: token has no connected bridge" }, id: null }, { "WWW-Authenticate": "Bearer" });
       return sendJson(res, 503, { error: "no bridge connected" });

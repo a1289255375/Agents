@@ -8,7 +8,7 @@
 
 ```text
   Cloud Agent（云端）
-      │  MCP 工具调用由 Cursor 后端发出，Shell 等待的 curl 由云端虚拟机发出
+      │  MCP 工具调用由 Cursor 后端发出
       ▼
   隧道的公网 HTTPS 地址
       │
@@ -76,7 +76,7 @@ node cloud/extension/build.mjs --out D:\tmp\ccb.vsix  # 指定输出路径
 **思考从哪里来**：就是 cursor.com/agents 聊天界面上能看到的那份思考，云端桥从 Cursor 的 [Cloud Agents API](https://cursor.com/docs/cloud-agent/api/endpoints) 读取（`GET /v1/agents/{id}/stream` 里的 `thinking` 事件），子代理不需要、也不会为此多写什么。要让它出现，需要两样东西：
 
 - 在本机给云端桥设置环境变量 `CURSOR_API_KEY`（在 Cursor 控制台 → API Keys 生成），设好后重启 IDE 或 `start-cloud.cmd`。没设置时桥照常工作，只是不显示思考，输出里会提示一次。这个变量不会传给子代理在本机执行的命令。
-- 子代理用 Shell 等待（提示词默认就这么做）。等待命令会带上云端 Shell 里现成的 `CURSOR_CONVERSATION_ID`（就是这个 Cloud Agent 的 id），桥据此订阅它的思考。一直只用 `wait_message` 等待的会话，桥不知道它是哪个 Cloud Agent，就读不到思考。
+- 子代理在 `connect_session` 里传入 `agent` 参数。提示词让它先读自己环境里现成的 `CURSOR_CONVERSATION_ID`（就是这个 Cloud Agent 的 id，`bc-…`），再把值传进来，桥据此订阅它的思考。没传（读不到这个变量）时桥不知道它是哪个 Cloud Agent，只是不显示思考，其他功能照常。桥重启后子代理只用原 id 调 `wait_message` 接回来时也不会带上 `agent`，要等它再调一次 `connect_session` 思考才会恢复。
 
 API key 读不到这个 Agent（密钥错、Agent 属于别的账号或已归档）时，会话里会出现一条说明和 Cursor 返回的 HTTP 状态。思考的有无和多少取决于模型本身是否输出可见思考。
 
@@ -90,7 +90,7 @@ API key 读不到这个 Agent（密钥错、Agent 属于别的账号或已归档
 | `publicUrl` | 隧道公网地址；`tunnel` 为 `cloudflared` 或填了 `relayUrl` 时忽略 |
 | `relayUrl` | 自建公网中继的地址，例如 `https://1.2.3.4` 或 `1.2.3.4`（默认按 https）。填了就自动进入中继模式，见[自建公网中继](#自建公网中继可选不经第三方隧道) |
 | `tunnel` | `none`、`cloudflared`（启动时顺带起快速隧道）或 `relay`（连 `relayUrl` 的中继；只填 `relayUrl` 也会自动进入） |
-| `waitSeconds` / `shellWaitSeconds` | 单次等待和 Shell 等待的上限秒数 |
+| `waitSeconds` | 单次等待的上限秒数 |
 | `autoStart` | IDE 启动后是否自动运行云端桥 |
 
 ### 插件验证到哪一步
@@ -201,7 +201,7 @@ Cloud Agent 的每次文件操作和命令都会出现在对话里。它要执�
 
 ## 隧道怎么选
 
-要求只有三条：公网上是 HTTPS 地址；能把请求原样转到 `http://127.0.0.1:3221`；单个请求至少能保持 60 秒不被切断。发起调用的是 Cursor 的后端（以及使用 Shell 等待时的云端虚拟机），它们在海外，所以隧道的公网入口要能从海外访问，而你的电脑要能稳定连上隧道服务商的中转节点。
+要求只有三条：公网上是 HTTPS 地址；能把请求原样转到 `http://127.0.0.1:3221`；单个请求至少能保持 60 秒不被切断。发起调用的是 Cursor 的后端，它在海外，所以隧道的公网入口要能从海外访问，而你的电脑要能稳定连上隧道服务商的中转节点。
 
 | 方案 | 地址是否固定 | 说明 |
 | --- | --- | --- |
@@ -296,26 +296,19 @@ frp 的做法是在云服务器上运行 `frps`，本机运行 `frpc` 把 `127.0
 
 ## 挂起等待是怎么保持的
 
-MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以“一直挂起”是由一连串短等待接起来的，提示词要求 Cloud Agent 在每次等待结束后立刻再等，不结束当前这一轮。
+MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以“一直挂起”是由一连串短等待接起来的：等待只用 `wait_message`（MCP 工具），一次最长 50 秒，没有消息就返回 `event=idle`。工具返回里只有数据，什么时候再等、收到消息后做什么，全写在提示词里（[`prompt.md`](prompt.md)）：`connect_session` 之后调用 `wait_message`；`event=message` 做完用 `reply_message` 回复，再调用 `wait_message`；`event=idle` 再调用 `wait_message`；`event=disconnected` 或你明确说结束时调用 `disconnect_session`。每次等待返回都要消耗一次模型调用，空闲一小时大约 72 次。
 
-有两种等待方式，Cloud Agent 接入时两种都会拿到：
-
-- **`wait_message`（MCP 工具）**：一次最长 50 秒，没有消息就返回 `event=idle` 和下一次要调用的 `nextCall`。每次返回都要消耗一次模型调用，空闲一小时大约 72 次。
-- **Shell 等待**：`connect_session` 返回一条 `curl` 循环命令，Cloud Agent 用它自己的终端工具在前台执行。一条命令最长挂 20 分钟，期间不消耗模型调用，空闲一小时大约 3 次。命令内部每 50 秒轮询一次，有消息就立刻结束并输出和 `wait_message` 相同的 JSON。连续三次请求失败时命令会自己结束，Cloud Agent 按提示退回 `wait_message`。
-
-服务运行期间消息不会丢：一条指令在 Cloud Agent 调用 `reply_message` 之前一直留在队列里。等待的响应如果在路上丢了（超时、隧道重启），下一次等待会再次收到它，并带着“之前已投递过”的标记，提示它已经处理过就只补发结果、不要重复执行。服务重启后，只要公网地址没变，Cloud Agent 带着原来的会话 id 继续等待就能自动接回来，但重启前的对话记录和还没回复的指令不保留。
+服务运行期间消息不会丢：一条指令在 Cloud Agent 调用 `reply_message` 之前一直留在队列里。等待的响应如果在路上丢了（超时、隧道重启），下一次等待会再次收到它，并带着 `redelivered: true`；提示词让它在已经处理过时只补发结果。服务重启后，只要公网地址没变，Cloud Agent 带着原来的会话 id 继续等待就能自动接回来，但重启前的对话记录和还没回复的指令不保留。
 
 可以调的参数：
 
 - `--wait-seconds`：一次等待请求的最长时间，默认 50。如果网页上提示“上一次 wait_message 在第 N 秒被对端切断”，按提示调小。
-- `--shell-wait-seconds`：一条 Shell 等待命令的最长时间，默认 1200。Cloud Agent 的终端工具能阻塞多久，官方没有给出数字；开发时在一个 Cloud Agent 上实测，要求阻塞 31 分钟的命令在约 27 分钟时被转到后台，所以默认值留了余量。设为 0 表示不提供 Shell 等待。
 
 需要知道的限制：
 
 - Cloud Agent 是否一直照做，取决于模型是否遵守提示词。它提前结束了这一轮时，网页会显示“未在等待”，按上面的办法让它回来即可，会话和排队的指令都还在。
-- 挂起期间的每次模型调用都会计入用量：官方文档写明 Cloud Agent 按所选模型的费率消耗你的方案用量，首次使用时会让你设置花费上限。长时间挂着时，优先让它用 Shell 等待，并留意用量。
+- 挂起期间的每次模型调用都会计入用量：官方文档写明 Cloud Agent 按所选模型的费率消耗你的方案用量，首次使用时会让你设置花费上限。长时间挂着时留意用量。
 - 一轮对话最长能持续多久，官方文档没有说明。
-- 如果你的 Cloud Agent 环境开了出站白名单，Shell 等待的 `curl` 是从云端虚拟机直接发出的，需要把隧道域名加入白名单；否则它会在三次失败后退回 `wait_message`。
 
 ## 安全
 
@@ -327,8 +320,6 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 - **网页不出本机**：网页和它的控制接口在另一个端口上，只监听 `127.0.0.1`，并且拒绝带代理转发头、Host 或 Origin 不是本机的请求（返回 403）。误把隧道指到这个端口时，这层检查是兜底，不要依赖它：隧道只应指向 `3221`。
 - **文件限制在项目根目录内**：所有路径先解析成真实路径再判断。用 `..`、绝对路径、其他盘符、UNC 路径、符号链接或目录联接（junction）指到根目录之外的，一律拒绝；设备路径（`\\?\`、`\\.\` 开头）、保留设备名（`CON`、`NUL` 等）和 NTFS 备用数据流也拒绝。文件工具不能改动 `.git` 目录，防止通过 git 钩子间接执行代码。
 - **命令默认逐条确认**：命令策略默认是 `ask`，每条命令都要你在网页上点“允许一次”才会执行。原因是命令一旦执行就不受项目根目录限制，它能做你这个 Windows 用户能做的任何事。“始终允许这条命令”只对一字不差的同一条命令（并且是同一种 shell）生效，只在本次运行期间有效。等待确认时如果云端超过 2 分钟不再查询，这条命令作废，不会在你事后点允许时突然执行。
-- **Shell 等待用的票据**：`curl` 命令里带的不是访问令牌，而是只能等待那一个会话消息的票据，拿到它不能调用任何工具。
-
 **命令策略怎么选**
 
 | 策略 | 适用 |
@@ -374,7 +365,6 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
   --relay <服务器地址>        主动连到自己公网服务器上的中继，例如 https://1.2.3.4（只填一项，公网地址即服务器地址）
   --command-policy <策略>     命令执行策略：ask 每条命令在网页上确认（默认）、allow 全部允许、deny 禁止
   --wait-seconds <秒>         一次等待请求最长挂起多久（默认 50；隧道或云端会更早切断时调小）
-  --shell-wait-seconds <秒>   一条 Shell 等待命令最长挂起多久，0 表示不提供 Shell 等待（默认 1200）
   --legacy-encoding <编码>    非 UTF-8 的文件和命令输出按什么编码处理（默认取系统代码页，中文 Windows 是 gbk）
   --state-dir <目录>          保存访问令牌等状态的目录（默认 ~/.cursor-cloud-bridge）
   --new-token                 重新生成访问令牌（旧令牌立即失效，云端配置要跟着改）
@@ -396,17 +386,17 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 
 | 工具 | 作用 |
 | --- | --- |
-| `connect_session` | 接入网页，返回 `event=bind`、会话 id、`nextCall` 和 Shell 等待命令。带上原 id 可以重新接入同一个会话 |
-| `wait_message` | 挂起等待下一条指令，返回 `message`、`idle` 或 `disconnected` |
-| `reply_message` | 把结果发到网页，并返回下一次等待要用的 `nextCall` |
+| `connect_session` | 接入网页，返回 `event=bind`、会话 id 和项目环境。带上原 id 可以重新接入同一个会话；可选参数 `agent` 是 Cloud Agent 的 id，用来读它的思考 |
+| `wait_message` | 挂起等待下一条指令，返回 `message`、`idle`、`superseded` 或 `disconnected` |
+| `reply_message` | 把结果发到网页，返回还在排队的消息数 `queued` |
 | `report_progress` | 任务进行中把进展发到网页 |
-| `disconnect_session` | 结束这个会话的等待 |
+| `disconnect_session` | 结束这个会话 |
 
-网页上的思考不经过这些工具，见[一次起多个 Cloud Agent，看思考过程](#5-一次起多个-cloud-agent看思考过程)。
+这些工具的返回只有数据，不带“下一步做什么”的说明；流程只写在提示词里。网页上的思考不经过这些工具的返回，见[一次起多个 Cloud Agent，看思考过程](#5-一次起多个-cloud-agent看思考过程)。
 
 项目工具：`project_info`、`list_dir`、`find_files`、`search_text`、`read_file`、`write_file`、`edit_file`（精确替换）、`delete_path`、`move_path`、`run_command`、`run_program`、`run_tests`、`command_status`、`stop_command`。
 
-协议形状沿用仓库里本地方案的 `connect_session` / `wait_message` / `reply_message` / `disconnect_session` 和 `nextCall` 约定。
+工具名沿用仓库里本地方案的 `connect_session` / `wait_message` / `reply_message` / `disconnect_session`。
 
 ## 官方文档确认了什么，没确认什么
 
@@ -434,7 +424,7 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 
 - cursor.com/agents 上添加 MCP 服务的界面具体有哪些输入框。上面第 4 步按“名称、URL、请求头”和 JSON 两种形式都给了，以实际界面为准。
 - Cursor 后端对单次 MCP 工具调用的超时上限。默认的 50 秒是按 MCP 客户端常见的 60 秒上限留的余量。
-- Cloud Agent 单轮对话的最长时长，以及终端工具单次阻塞的上限（只有上文那一次实测）。
+- Cloud Agent 单轮对话的最长时长。
 - 出站白名单是否也约束由后端代理的 MCP 调用。
 - 正在运行的 Cloud Agent 是否会用上修改后的 MCP 地址。
 - 除 cloudflared 快速隧道以外的各种隧道，以及任何隧道在中国大陆网络下的表现。
@@ -448,8 +438,7 @@ MCP 客户端、Cursor 后端和隧道都会切断挂得太久的请求，所以
 **只在 Linux 上验证过**（开发用的云端虚拟机，在海外）：
 
 - 经 cloudflared 快速隧道的全流程：接入、等待、下指令、改文件、确认命令、回复、再等待。扮演 Cloud Agent 的是官方 MCP SDK 的客户端。
-- 挂起等待：一个会话用 `wait_message` 经隧道连续挂了 30 分钟（空等返回 36 次，中间处理了一条指令）；Shell 等待命令在没有消息时挂满 20 分钟后返回 `idle`（实测 1204 秒）。
-- Shell 等待命令在 dash、bash、zsh、busybox ash 下运行；也由一个真实 Cloud Agent 的终端工具经隧道执行过，指令一到命令就返回。
+- 挂起等待：一个会话用 `wait_message` 经隧道连续挂了 30 分钟（空等返回 36 次，中间处理了一条指令）。
 - 自建中继全流程：把中继用 `deploy.sh --insecure-http` 部署到一台真实的公网 Linux 服务器（systemd、非 root 运行），开发机上的云端桥以中继模式主动连上去，官方 MCP SDK 客户端经 `http://<服务器IP>:18443/mcp` 列工具、开两个会话、下指令、改文件、`run_command` 拿到 stdout/stderr/退出码、回复。其中一次 `wait_message` 经公网中继实测挂满 50.6 秒才返回 `idle`（**没有被缓冲**，期间下的指令约 0.9 秒就送达）；把中继服务重启一次，插件约 1.5 秒自动重连，会话继续。
 - 在 Chrome 里实际操作网页控制台。
 
@@ -501,7 +490,7 @@ cloud/
   src/http.mjs        两个 HTTP 监听：MCP 端点和本机控制台
   src/mcp.mjs         MCP 工具定义
   src/hub.mjs         会话、消息队列、操作记录
-  src/auth.mjs        令牌和 Shell 等待票据
+  src/auth.mjs        访问令牌的生成和校验
   src/tunnel.mjs      cloudflared 快速隧道
   src/relay-mux.mjs   中继帧多路复用（中继服务端和插件链路共用）
   src/relay-link.mjs  插件侧：主动连中继、把请求转到本机 MCP 端点
