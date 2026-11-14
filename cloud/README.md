@@ -38,6 +38,60 @@
 - 一条能把本机端口暴露成公网 HTTPS 地址的隧道。怎么选见[隧道怎么选](#隧道怎么选)。
 - 建议安装 Git for Windows：项目是 git 仓库时，搜索会遵守 `.gitignore`。
 
+## 作为 IDE 插件使用（推荐）
+
+把云端桥打包成 Cursor / VS Code 插件（`.vsix`）装进 IDE。IDE 启动后插件自动在本机把云端桥跑起来，无需再双击 `start-cloud.cmd`（它仍保留为备用，见[从零开始](#从零开始)）。插件在扩展宿主进程里直接运行 `cloud/src` 的同一套代码，把本机能力通过 MCP 暴露给 Cloud Agent，并在 IDE 面板里给云端子代理下指令、看思考过程。插件源码在 [`extension/`](extension/)。
+
+### 1. 打包 vsix
+
+```bash
+node cloud/extension/build.mjs                       # 生成 cloud/extension/cursor-cloud-bridge-<版本>.vsix
+node cloud/extension/build.mjs --out D:\tmp\ccb.vsix  # 指定输出路径
+```
+
+构建脚本把 `cloud/src`、`cloud/web`、`cloud/prompt.md` 复制到插件目录，安装运行时依赖（`@modelcontextprotocol/sdk`、`zod`），再用 `npx @vscode/vsce` 打包。`@vscode/vsce` 只在打包时用，不是插件的运行时依赖。
+
+### 2. 安装 vsix
+
+在 Cursor / VS Code 命令面板运行 **Extensions: Install from VSIX…**，选择 `.vsix`；或命令行 `cursor --install-extension <file>.vsix`（VS Code 为 `code --install-extension`）。装完重载窗口。
+
+### 3. 打开界面、设置工作区
+
+- 命令面板搜“Cursor 云端桥”，运行 **打开控制台**。面板内嵌的就是下文的[网页控制台](#网页控制台)：会话列表、思考、进展、文件差异、命令确认都在里面。面板空白时用 **在浏览器中打开控制台**。
+- 工作区（交给 Cloud Agent 的项目根目录）默认取当前 IDE 工作区的第一个文件夹，可用设置 `cursorCloudBridge.workspaceRoot` 或命令 **设置工作区目录** 改成任意文件夹。Cloud Agent 的文件读写被限制在这个目录内，挡住路径穿越。改工作区会用新根目录重启云端桥。
+
+### 4. 一键准备云端接入
+
+运行命令 **准备云端接入（一键）**。插件会确保云端桥在跑（设置 `cursorCloudBridge.tunnel` 为 `cloudflared` 时顺带起一条快速隧道），把下面这些可复制的值写进“Cursor 云端桥”输出面板，并在弹窗里提供“复制 MCP 配置 / 复制请求头 / 复制提示词”：
+
+- MCP 服务名称、URL、请求头 `Authorization: Bearer <令牌>`，以及完整 JSON 配置；
+- 发给 Cloud Agent 的提示词（把挂起循环写死的中文模板）。
+
+**必须由你在 cursor.com 手动完成、这个环境替你做不了的一步**：打开 [cursor.com/agents](https://cursor.com/agents) 的 MCP 下拉菜单，添加一个 HTTP 自定义 MCP 服务（填上面的名称、URL、请求头，或粘贴 JSON）并启用；再新建 Cloud Agent，把提示词作为第一条消息发给它。插件不会假装替你点过这一步，输出面板里会明确写出来。
+
+### 5. 一次起多个 Cloud Agent，看思考过程
+
+在 cursor.com/agents 对每个新建的 Cloud Agent 都发同一份提示词即可；一个插件可同时接住约十个云端会话，左侧列表并列显示，各自独立下指令。选中某个会话，对话区会按时间显示它的 `report_thinking` 思考、`report_progress` 进展、读写了哪些文件（带差异）、执行了什么命令和输出、以及 `reply_message` 的回复和它附带的思考。
+
+**关于“思考过程”的界限**：Cursor 平台不会把 Cloud Agent 的原始思维链交给第三方 MCP 服务，本插件也拿不到。控制台展示的“思考”，是子代理通过 `report_thinking` 和 `reply_message` 的 `thinking` 参数**主动回传**的内容，加上它调用项目工具的真实步骤（读写文件、命令及输出）。提示词已要求它开工前和每个关键步骤回传思考，但具体回传多少取决于模型是否照做。
+
+### 插件设置项（`cursorCloudBridge.*`）
+
+| 设置 | 作用 |
+| --- | --- |
+| `workspaceRoot` | 工作区根目录，留空用当前工作区第一个文件夹 |
+| `commandPolicy` | 命令执行策略：`ask`（默认，逐条确认）、`allow`、`deny`。运行中也可用命令或控制台切换 |
+| `consolePort` / `mcpPort` | 控制台（默认 3220）和 MCP 端点（默认 3221）端口 |
+| `publicUrl` | 隧道公网地址；`tunnel` 为 `cloudflared` 时忽略 |
+| `tunnel` | `none` 或 `cloudflared`（启动时顺带起快速隧道） |
+| `waitSeconds` / `shellWaitSeconds` | 单次等待和 Shell 等待的上限秒数 |
+| `autoStart` | IDE 启动后是否自动运行云端桥 |
+
+### 插件验证到哪一步
+
+- 在本仓库的 Linux 开发机上：用插件的控制器代码（`extension/lib/controller.mjs`）在固定端口起桥，十个 MCP 客户端扮演子代理并列接入，走通“下指令 → 回传思考 → 读文件 → 改文件（差异）→ 请求执行命令 → 逐条确认 → 命令输出 → 回复 → 再次挂起”整条循环，并在 Chrome 里截图录屏；把打包好的 `.vsix` 解压后，用它自带的 `extension.js` 在打包布局下成功起桥、读到 `web/` 与 `prompt.md` 资产。
+- 没有在真实 Windows 的 Cursor / VS Code 里装过这个 vsix、也没在 IDE 的 webview 面板里实测内嵌 iframe（本环境没有带界面的 IDE）。内嵌面板依赖桌面版 IDE 的 `asExternalUri` 把本机端口暴露给 webview；万一面板空白，用 **在浏览器中打开控制台** 一定可用。
+
 ## 从零开始
 
 ### 1. 安装 Node.js，取得本仓库
@@ -372,7 +426,10 @@ cloud/
   web/                网页控制台
   prompt.md           发给 Cloud Agent 的提示词
   test/               自动化测试
+  extension/          IDE 插件（.vsix）：extension.js 入口、lib/ 逻辑、build.mjs 打包、test/ 测试
 ```
+
+`npm test` 同时覆盖云端桥和插件的测试。打包插件：`node cloud/extension/build.mjs`（或 `npm run cloud:vsix`），说明见 [`extension/README.md`](extension/README.md)。
 
 ## 和本地方案的关系
 

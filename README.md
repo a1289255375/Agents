@@ -81,4 +81,9 @@ npm run smoke -- --mode chat --prompt '只回复 CURSOR_MCP_OK，不调用工具
 
 ## 云端桥：让 Cloud Agent 操作本机项目
 
-以上都是驱动本机 Cursor Desktop 的本地方案。要让运行在 Cursor 云端的 Cloud Agent 通过 MCP 读写本机项目、执行命令，并在网页上给它下指令，用 `start-cloud.cmd`，说明见 [cloud/README.md](cloud/README.md)。两套方案互不影响，可以同时运行。
+以上都是驱动本机 Cursor Desktop 的本地方案。要让运行在 Cursor 云端的 Cloud Agent 通过 MCP 读写本机项目、执行命令，并在界面上给它下指令、看它的思考过程，用“云端桥”。
+
+- **推荐：装成 IDE 插件（.vsix）。** `node cloud/extension/build.mjs` 打包，装进 Cursor / VS Code 后 IDE 启动即自动运行云端桥，面板里一次可接住约十个云端子代理。打包、安装、设置工作区、一键准备云端接入见 [cloud/README.md 的“作为 IDE 插件使用”](cloud/README.md#作为-ide-插件使用推荐)。
+- **备用：双击 `start-cloud.cmd`。** 不装插件也能用，说明见 [cloud/README.md](cloud/README.md)。
+
+云端桥和这里的本地方案互不影响，可以同时运行。
