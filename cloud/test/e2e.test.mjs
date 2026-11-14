@@ -660,8 +660,12 @@ test("drill: thinking, run_program and run_tests through the local bridge", asyn
   assert.match(program.text, /── stderr 部分.*\nwarn\n── 文件变更：新增 1，/s);
 
   const tests = await call("run_tests", { session });
-  assert.match(tests.text, /^测试命令：npm test（依据 package\.json 的 test 脚本（npm））\n\[c2\] 已结束，退出码 0，/);
-  assert.match(tests.text, /said tests/);
+  assert.match(tests.text, /^测试命令：npm test（依据 package\.json 的 test 脚本（npm））\n\[c2\] /);
+  // npm is a slow-starting .cmd on Windows, so poll until the job is final instead of assuming one wait.
+  let status = tests.text;
+  while (status.includes("仍在运行")) status = (await call("command_status", { jobId: "c2", session })).text;
+  assert.match(status, /\[c2\] 已结束，退出码 0，/);
+  assert.match(status, /said tests/);
 
   assert.equal((await call("reply_message", { id: session, text: "都跑完了", thinking: "程序和测试都正常" })).data.event, "replied");
   const view = await state(session);
